@@ -42,3 +42,20 @@ class TestUpgradePathValidation:
         current = parse_version("1.33")
         target = parse_version("1.32")
         assert target < current
+
+
+class TestPreviousMinor:
+    """Rollback targets exactly one minor below the current version."""
+
+    @pytest.mark.parametrize(
+        "current,expected",
+        [
+            ("1.36", "1.35"),
+            ("1.33", "1.32"),
+            ("1.10", "1.9"),  # X.10 -> X.9 boundary must not break (no float math)
+        ],
+    )
+    def test_previous_minor(self, current, expected):
+        from eksupgrade.models.eks import _previous_minor
+
+        assert _previous_minor(current) == expected

@@ -107,6 +107,16 @@ def _default_next_minor(version: str) -> str:
     return f"{parsed.major}.{parsed.minor + 1}"
 
 
+def _previous_minor(version: str) -> str:
+    """Return the previous minor version string (e.g. '1.36' -> '1.35').
+
+    The EKS version rollback target is always exactly one minor below the
+    current version. Integer math, so the X.10 -> X.9 boundary is safe.
+    """
+    parsed = Version(version)
+    return f"{parsed.major}.{parsed.minor - 1}"
+
+
 TOKEN_PREFIX: str = "k8s-aws-v1"
 TOKEN_HEADER_KEY: str = "x-k8s-aws-id"
 
@@ -885,6 +895,45 @@ class Cluster(EksResource):
         if _update_errors:
             echo_error(
                 f"Errors encountered while attempting to update cluster: {self.name} - Errors: {_update_errors}",
+            )
+            self.errors += _update_errors
+        if wait:
+            self.wait_for_active()
+        return update_response_body
+
+    def rollback_cluster(self, wait: bool = True, force: bool = False) -> UpdateTypeDef | None:
+        """Roll the control plane back one minor version (EKS version rollback).
+
+        Uses the same UpdateClusterVersion API as an upgrade — EKS treats an
+        N-1 target as a VersionRollback. The service enforces the hard
+        prerequisites (7-day window, in-place upgrade history, sequential
+        rollback); `force` bypasses insight checks only, never those.
+        """
+        if self._version_object <= self._target_version_object:
+            echo_warning(
+                f"Cluster: {self.name} version: {self.version} is not above rollback target: "
+                f"{self.target_version}! Skipping cluster rollback!",
+            )
+            return None
+
+        if self._version_object.minor - self._target_version_object.minor != 1:
+            echo_error(
+                f"Cluster: {self.name} can only be rolled back one minor at a time "
+                f"({self.version} -> {self.target_version} is not N-1).",
+            )
+            raise InvalidUpgradeTargetVersion()
+
+        echo_info(f"Rolling back cluster: {self.name} from version: {self.version} to version: {self.target_version}")
+        rollback_kwargs: dict[str, Any] = {"force": True} if force else {}
+        update_response: UpdateClusterVersionResponseTypeDef = self.eks_client.update_cluster_version(
+            name=self.name, version=self.target_version, **rollback_kwargs
+        )
+        update_response_body: UpdateTypeDef = update_response["update"]
+        _update_errors = update_response_body.get("errors", [])
+
+        if _update_errors:
+            echo_error(
+                f"Errors encountered while attempting to roll back cluster: {self.name} - Errors: {_update_errors}",
             )
             self.errors += _update_errors
         if wait:

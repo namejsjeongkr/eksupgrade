@@ -454,3 +454,48 @@ def test_default_version_falls_back_when_no_default_flag(eks_client, eks_cluster
 
     assert addon_resource.default_version == "v1.2.3-eksbuild.1"
     assert addon_resource.needs_upgrade is False
+
+
+def _rollback_cluster(current: str, target: str) -> Cluster:
+    """Build a Cluster on `current` targeting `target` with a mocked eks client."""
+    cluster = Cluster(arn="abc", name="eks-test", version=current, target_version=target, region="ap-northeast-2")
+    cluster.eks_client = MagicMock()
+    cluster.eks_client.update_cluster_version.return_value = {"update": {"id": "u1", "status": "InProgress"}}
+    return cluster
+
+
+def test_rollback_cluster_calls_update_without_force_by_default(eks_client, eks_cluster) -> None:
+    cluster = _rollback_cluster("1.36", "1.35")
+
+    cluster.rollback_cluster(wait=False)
+
+    call = cluster.eks_client.update_cluster_version.call_args
+    assert call.kwargs["name"] == "eks-test"
+    assert call.kwargs["version"] == "1.35"
+    assert "force" not in call.kwargs
+
+
+def test_rollback_cluster_passes_force_when_requested(eks_client, eks_cluster) -> None:
+    cluster = _rollback_cluster("1.36", "1.35")
+
+    cluster.rollback_cluster(wait=False, force=True)
+
+    call = cluster.eks_client.update_cluster_version.call_args
+    assert call.kwargs["force"] is True
+
+
+def test_rollback_cluster_rejects_multi_minor_target(eks_client, eks_cluster) -> None:
+    from eksupgrade.exceptions import InvalidUpgradeTargetVersion
+
+    cluster = _rollback_cluster("1.36", "1.34")
+
+    with pytest.raises(InvalidUpgradeTargetVersion):
+        cluster.rollback_cluster(wait=False)
+    cluster.eks_client.update_cluster_version.assert_not_called()
+
+
+def test_rollback_cluster_skips_when_already_at_target(eks_client, eks_cluster) -> None:
+    cluster = _rollback_cluster("1.35", "1.35")
+
+    assert cluster.rollback_cluster(wait=False) is None
+    cluster.eks_client.update_cluster_version.assert_not_called()
