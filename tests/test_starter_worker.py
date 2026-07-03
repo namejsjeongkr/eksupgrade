@@ -11,7 +11,9 @@ import queue as queue_module
 import time
 from unittest.mock import MagicMock, patch
 
-from eksupgrade.starter import StatsWorker
+import pytest
+
+from eksupgrade.starter import StatsWorker, actual_update
 
 _ACTUAL_UPDATE = "eksupgrade.starter.actual_update"
 _UPDATE_NODEGROUP = "eksupgrade.starter.update_nodegroup"
@@ -87,3 +89,36 @@ def test_managed_branch_failure_also_marks_task_done(mock_update):
     q.put(["my-cluster", "mng-1", "1.36", "us-east-1", 2, False, "managed"])
     assert _drain_queue(q)
     assert "mng-1" in failures
+
+
+@patch("eksupgrade.starter.time.sleep", return_value=None)
+@patch("eksupgrade.starter.worker_terminate")
+@patch("eksupgrade.starter.find_node")
+@patch("eksupgrade.starter.get_num_of_instances", return_value=2)
+@patch("eksupgrade.starter.outdated_lt", return_value=["i-old"])
+@patch("eksupgrade.starter.get_outdated_asg", return_value=False)
+@patch("eksupgrade.starter.get_latest_ami", return_value="ami-new")
+@patch("eksupgrade.starter.get_ami_name", return_value=("amazon linux 2", "amazon-eks-node-1.36"))
+def test_node_vanishing_mid_check_fails_bounded_not_infinite(
+    mock_ami_name,
+    mock_latest_ami,
+    mock_outdated_asg,
+    mock_outdated_lt,
+    mock_num,
+    mock_find_node,
+    mock_terminate,
+    mock_sleep,
+):
+    """actual_update's node re-check loop must be bounded.
+
+    The legacy loop only incremented its retry counter when the node WAS
+    found; a node that deregistered mid-loop (find_node -> "NAN") froze the
+    counter and spun forever. It must instead exhaust max_retry and raise.
+    """
+    # Found once (passes the outer check), then gone on every re-check.
+    mock_find_node.side_effect = ["node-1"] + ["NAN"] * 10
+
+    with pytest.raises(Exception, match="404"):
+        actual_update("my-cluster", "asg-1", "1.36", "us-east-1", max_retry=2, forced=False)
+
+    mock_terminate.assert_called_once()

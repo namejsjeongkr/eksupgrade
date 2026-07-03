@@ -145,6 +145,22 @@ def test_cluster_autoscaler_resumed_on_error():
     assert "start" in operations
 
 
+def test_karpenter_scaled_to_zero_skips_drift_wait():
+    """Karpenter deployed but scaled to 0 replicas cannot drift anything —
+    waiting 30 minutes for drift is pure waste. Warn and skip the wait."""
+    fake_cluster = _fake_upgradeable_cluster()
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch("eksupgrade.cli.is_cluster_auto_scaler_present", return_value=(False, 0, "", "")),
+        patch("eksupgrade.cli.is_karpenter_present", return_value=(True, 0, "karpenter")),
+        patch("eksupgrade.cli.handle_karpenter_drift") as mock_drift,
+    ):
+        result = runner.invoke(app, ["c", "1.35", "ap-northeast-2", "--no-interactive"])
+
+    mock_drift.assert_not_called()
+    assert "0 replicas" in result.output
+
+
 def test_parallel_worker_failure_fails_the_upgrade():
     """A failed parallel node group update must NOT let the CLI report overall success."""
     fake_cluster = _fake_upgradeable_cluster()

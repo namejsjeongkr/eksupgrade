@@ -118,16 +118,18 @@ def actual_update(cluster_name, asg_iter, to_update, region, max_retry, forced):
 
             old_pod_id = find_node(cluster_name=cluster_name, instance_id=instance, operation="find", region=region)
             if old_pod_id != "NAN":
-                retry = 0
+                # Re-confirm the instance still maps to a node, retrying a BOUNDED
+                # number of times. The legacy loop only advanced its counter when
+                # the node WAS found, so a node deregistering mid-loop spun forever.
                 flag = 0
-                while retry <= max_retry:
+                for _ in range(max_retry + 1):
                     if (
-                        not find_node(cluster_name=cluster_name, instance_id=instance, operation="find", region=region)
-                        == "NAN"
+                        find_node(cluster_name=cluster_name, instance_id=instance, operation="find", region=region)
+                        != "NAN"
                     ):
                         flag = 1
-                        retry += 1
-                        time.sleep(10)
+                        break
+                    time.sleep(10)
                 if flag == 0:
                     worker_terminate(instance, region=region)
                     echo_error("404 instance is not corresponded to particular node group")

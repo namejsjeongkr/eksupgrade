@@ -72,10 +72,15 @@ def get_latest_instance(asg_name: str, add_time: datetime.datetime, region: str)
         raise e
 
 
-def wait_for_ready(instanceid: str, region: str) -> bool:
-    """Wait for the cluster to pass the status checks."""
+def wait_for_ready(instanceid: str, region: str, timeout: int = 1800) -> bool:
+    """Wait, with a bound, for the instance to pass the status checks.
+
+    An instance stuck in initializing/impaired must fail the upgrade after
+    `timeout` seconds instead of hanging the whole run forever.
+    """
     ec2_client = boto3.client("ec2", region_name=region)
     echo_info(f"Instance {instanceid} waiting for the instance to pass the Health Checks")
+    deadline = time.monotonic() + timeout
     try:
         while (
             ec2_client.describe_instance_status(InstanceIds=[instanceid])["InstanceStatuses"][0]["InstanceStatus"][
@@ -83,6 +88,8 @@ def wait_for_ready(instanceid: str, region: str) -> bool:
             ][0]["Status"]
             != "passed"
         ):
+            if time.monotonic() >= deadline:
+                raise Exception(f"Instance {instanceid} did not pass health checks within {timeout}s")
             echo_info(f"Instance: {instanceid} waiting for the instance to pass the Health Checks")
             time.sleep(20)
     except Exception as e:
