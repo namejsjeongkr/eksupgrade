@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from eksupgrade.src.eks_get_image_type import image_type
+from eksupgrade.src.eks_get_image_type import get_ami_name, image_type
 
 _EC2_MODULE = "eksupgrade.src.eks_get_image_type.boto3.client"
 
@@ -143,3 +143,42 @@ class TestUnsupportedNodeType:
     def test_empty_node_type_returns_none(self, region) -> None:
         result = image_type(node_type="", image_id="ami-x", region=region)
         assert result is None
+
+
+@patch("eksupgrade.src.eks_get_image_type.image_type")
+@patch("eksupgrade.src.eks_get_image_type.find_node")
+@patch("eksupgrade.src.eks_get_image_type.boto3")
+def test_mixed_os_asg_returns_node_type_then_image_name(mock_boto3, mock_find_node, mock_image_type):
+    """Mixed-OS ASG: the return order must match the homogeneous case
+    ([node_type, image_name]) — the legacy tuple was (image_name, node_type),
+    so callers unpacked swapped values."""
+    asg = MagicMock()
+    ec2 = MagicMock()
+    mock_boto3.client.side_effect = lambda svc, region_name=None: asg if svc == "autoscaling" else ec2
+    asg.describe_auto_scaling_groups.return_value = {
+        "AutoScalingGroups": [{"Instances": [{"InstanceId": "i-1"}, {"InstanceId": "i-2"}, {"InstanceId": "i-3"}]}]
+    }
+    ec2.describe_instances.return_value = {
+        "Reservations": [
+            {
+                "Instances": [
+                    {"InstanceId": "i-1", "ImageId": "ami-al2"},
+                    {"InstanceId": "i-2", "ImageId": "ami-br"},
+                    {"InstanceId": "i-3", "ImageId": "ami-br"},
+                ]
+            }
+        ]
+    }
+    # One AL2 node, two Bottlerocket nodes -> least-repeated OS is AL2.
+    mock_find_node.side_effect = ["Amazon Linux 2", "Bottlerocket OS 1.32.0", "Bottlerocket OS 1.32.0"]
+    mock_image_type.side_effect = [
+        "amazon-eks-node-1.32-v20250101",
+        "bottlerocket-aws-k8s-1.32-x86_64",
+        "bottlerocket-aws-k8s-1.32-x86_64",
+    ]
+
+    result = get_ami_name("my-cluster", "asg-1", "us-east-1")
+
+    node_type, image_name = result[0], result[1]
+    assert node_type == "Amazon Linux 2"
+    assert image_name == "amazon-eks-node-1.32-v20250101"

@@ -82,4 +82,8 @@ def get_ami_name(cluster_name: str, asg_name: str, region: str):
         for d, ak in ans:
             dd[d] = dd.get(d, 0) + 1
             ac[d] = ac.get(d, ak)
-        return min((ac.get(d, ""), d) for d in dd)
+        # Mixed OS types: pick the least-repeated node type and return in the
+        # SAME [node_type, image_name] order as the homogeneous branch — the
+        # legacy tuple was (image_name, node_type), so callers unpacked swapped values.
+        least_repeated = min(dd, key=lambda node_type: (dd[node_type], node_type))
+        return [least_repeated, ac.get(least_repeated, "")]
