@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import boto3
 from kubernetes import client as k8s_client
 from packaging.version import parse as parse_version
 from rich.console import Console
@@ -110,12 +111,36 @@ def _check_control_plane(cluster) -> list[PreflightFinding]:
     return findings
 
 
+def _custom_ng_current_image(ng, region: str) -> str:
+    """Return a CUSTOM node group's current AMI ImageLocation (the OS hint).
+
+    Mirrors the runtime resolver (ManagedNodeGroup._resolve_custom_target_ami)
+    so preflight judges the SAME facts the upgrade will act on.
+    """
+    ec2 = boto3.client("ec2", region_name=region)
+    lt_id = ng.launch_template["id"]
+    lt_version = str(ng.launch_template["version"])
+    lt_versions = ec2.describe_launch_template_versions(LaunchTemplateId=lt_id, Versions=[lt_version]).get(
+        "LaunchTemplateVersions", []
+    )
+    if not lt_versions:
+        raise Exception(f"launch template {lt_id} version {lt_version} not found")
+    current_ami = lt_versions[0]["LaunchTemplateData"]["ImageId"]
+    images = ec2.describe_images(ImageIds=[current_ami]).get("Images", [])
+    if not images:
+        raise Exception(f"current AMI {current_ami} not found (it may have been deregistered)")
+    return images[0]["ImageLocation"]
+
+
 def _check_managed_nodegroups(cluster, region: str) -> list[PreflightFinding]:
     """Check each managed node group; for CUSTOM amiType, verify target AMI resolves.
 
     For CUSTOM the tool must resolve a new AMI itself (AWS rejects version-only
-    updates), so a failed resolve is blocking. Non-CUSTOM groups are AWS-managed
-    rolling upgrades and only reported as pass.
+    updates), so a failed resolve is blocking. The OS is determined from the
+    launch template's ACTUAL current AMI (not assumed): a CUSTOM group backed
+    by an AL2 image is blocking (AL2 ends at 1.32 and the runtime resolver
+    cannot classify it either). Non-CUSTOM groups are AWS-managed rolling
+    upgrades and only reported as pass.
     """
     findings: list[PreflightFinding] = []
     area = "Managed NodeGroups"
@@ -143,28 +168,44 @@ def _check_managed_nodegroups(cluster, region: str) -> list[PreflightFinding]:
             continue
 
         try:
-            # Mirror the working self_managed.py CUSTOM call: get_latest_ami keys the
-            # OS family off instance_type, so both instance_type and image_to_search
-            # carry the os_type hint. We assume CUSTOM == Bottlerocket here (the only
-            # CUSTOM family this tool resolves); this is a documented simplification.
-            ami = get_latest_ami(cluster.target_version, "bottlerocket", "bottlerocket", region)
+            os_hint = _custom_ng_current_image(ng, region)
+        except Exception as exc:  # noqa: BLE001 - read-only check must not abort
+            findings.append(
+                PreflightFinding(area, ng.name, "blocking", f"CUSTOM: could not inspect the launch template AMI: {exc}")
+            )
+            continue
+
+        lowered_hint = os_hint.lower()
+        if "amazon-eks-node" in lowered_hint and "al2023" not in lowered_hint:
+            # The CUSTOM launch template actually points at an AL2 image.
+            if parse_version(cluster.target_version) > parse_version("1.32"):
+                detail = (
+                    f"CUSTOM launch template uses an AL2 image ({os_hint}); AL2 AMIs end at 1.32 — "
+                    f"migrate to AL2023 or Bottlerocket before targeting {cluster.target_version}"
+                )
+            else:
+                detail = f"CUSTOM launch template uses an AL2 image ({os_hint}), which this tool cannot auto-resolve"
+            findings.append(PreflightFinding(area, ng.name, "blocking", detail))
+            continue
+
+        if "Windows_Server" in os_hint:
+            os_hint = os_hint[:46]  # same trim the runtime resolver applies
+
+        try:
+            # Mirror the runtime resolver: get_latest_ami keys the OS family off
+            # instance_type, so both arguments carry the actual image hint.
+            ami = get_latest_ami(cluster.target_version, os_hint, os_hint, region)
             if not ami or ami == "NAN":
                 findings.append(
-                    PreflightFinding(
-                        area, ng.name, "blocking", "CUSTOM (assumed Bottlerocket); target AMI did not resolve"
-                    )
+                    PreflightFinding(area, ng.name, "blocking", f"CUSTOM ({os_hint}): target AMI did not resolve")
                 )
             else:
                 findings.append(
-                    PreflightFinding(
-                        area, ng.name, "pass", f"CUSTOM (assumed Bottlerocket); target AMI resolves to {ami}"
-                    )
+                    PreflightFinding(area, ng.name, "pass", f"CUSTOM ({os_hint}); target AMI resolves to {ami}")
                 )
         except Exception as exc:  # noqa: BLE001 - read-only check must not abort
             findings.append(
-                PreflightFinding(
-                    area, ng.name, "blocking", f"CUSTOM (assumed Bottlerocket); could not resolve target AMI: {exc}"
-                )
+                PreflightFinding(area, ng.name, "blocking", f"CUSTOM ({os_hint}): could not resolve target AMI: {exc}")
             )
 
     return findings
