@@ -17,7 +17,7 @@ CLUSTER = "test-cluster"
 REGION = "us-east-1"
 NODE = "ip-10-0-1-1.ec2.internal"
 
-_WATCHER = "eksupgrade.src.k8s_client.watcher"
+_WATCHER = "eksupgrade.src.k8s_client._wait_for_pod_gone"
 _SLEEP = "eksupgrade.src.k8s_client.time.sleep"
 
 
@@ -88,3 +88,36 @@ def test_other_api_errors_still_raise(mock_watcher, mock_sleep):
 
     with pytest.raises(ApiException):
         _evict_pod(CLUSTER, NODE, _make_pod(), core, REGION)
+
+
+class TestWaitForPodGone:
+    """Deletion is confirmed by polling the ONE evicted pod (kubectl-style),
+    not by streaming every pod in the cluster through a 30s watch."""
+
+    @patch(_SLEEP)
+    def test_true_when_pod_is_gone(self, mock_sleep):
+        from eksupgrade.src.k8s_client import _wait_for_pod_gone
+
+        core = MagicMock()
+        core.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+
+        assert _wait_for_pod_gone(core, "app-pod", "default") is True
+
+    @patch(_SLEEP)
+    def test_false_on_timeout_while_pod_persists(self, mock_sleep):
+        from eksupgrade.src.k8s_client import _wait_for_pod_gone
+
+        core = MagicMock()
+        core.read_namespaced_pod.return_value = MagicMock()  # pod still there
+
+        assert _wait_for_pod_gone(core, "app-pod", "default", timeout=0) is False
+
+    @patch(_SLEEP)
+    def test_non_404_errors_propagate(self, mock_sleep):
+        from eksupgrade.src.k8s_client import _wait_for_pod_gone
+
+        core = MagicMock()
+        core.read_namespaced_pod.side_effect = ApiException(status=500, reason="Internal Server Error")
+
+        with pytest.raises(ApiException):
+            _wait_for_pod_gone(core, "app-pod", "default")
