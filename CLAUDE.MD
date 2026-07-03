@@ -511,7 +511,7 @@ The tool uses Python's logging module with format:
 Set log level via environment:
 ```bash
 export LOG_LEVEL=DEBUG
-eksupgrade my-cluster 1.26 us-east-1
+eksupgrade upgrade my-cluster 1.26 us-east-1
 ```
 
 ## Entry Points
@@ -520,17 +520,17 @@ eksupgrade my-cluster 1.26 us-east-1
 
 ```bash
 # Basic upgrade
-eksupgrade my-cluster 1.26 us-east-1
+eksupgrade upgrade my-cluster 1.26 us-east-1
 
 # With options
-eksupgrade my-cluster 1.26 us-east-1 \
+eksupgrade upgrade my-cluster 1.26 us-east-1 \
   --parallel \
   --latest-addons \
   --force \
   --max-retry 3
 
 # Non-interactive (CI/CD)
-eksupgrade my-cluster 1.26 us-east-1 --no-interactive
+eksupgrade upgrade my-cluster 1.26 us-east-1 --no-interactive
 
 # Show version
 eksupgrade --version

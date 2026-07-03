@@ -14,10 +14,11 @@ from eksupgrade import __version__
 from eksupgrade.utils import PhaseTimer, confirm, echo_error, echo_info, echo_warning, get_logger
 
 from .exceptions import ClusterInactiveException
-from .models.eks import Cluster
+from .models.eks import Cluster, _previous_minor
 from .src.k8s_client import cluster_auto_enable_disable, is_cluster_auto_scaler_present, is_karpenter_present
 from .src.karpenter import handle_karpenter_drift
 from .src.preflight import run_preflight
+from .src.rollback import get_rollback_readiness, incompatible_addons
 from .starter import StatsWorker, actual_update
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -34,7 +35,16 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.command()
+@app.callback()
+def callback(
+    version: Optional[bool] = typer.Option(
+        None, "--version", callback=version_callback, is_eager=True, help="Display the current eksupgrade version"
+    ),
+) -> None:
+    """Automated Amazon EKS cluster upgrade CLI utility."""
+
+
+@app.command(name="upgrade")
 def main(
     cluster_name: str = typer.Argument(..., help="The name of the cluster to be upgraded"),
     cluster_version: str = typer.Argument(..., help="The target Kubernetes version to upgrade the cluster to"),
@@ -50,11 +60,8 @@ def main(
         default=False, help="Disable the pre-upgrade and post-upgrade checks during upgrade scenarios"
     ),
     interactive: bool = typer.Option(default=True, help="If enabled, prompt the user for confirmations"),
-    version: Optional[bool] = typer.Option(
-        None, "--version", callback=version_callback, is_eager=True, help="Display the current eksupgrade version"
-    ),
 ) -> None:
-    """Run eksupgrade against a target cluster."""
+    """Upgrade a target cluster to the next Kubernetes version."""
     queue: Queue[list[str | int | bool]] = Queue()
 
     if disable_checks:
@@ -259,6 +266,146 @@ def main(
 
         # Emit the per-phase timing summary last, after any autoscaler-resume
         # messages. Skipped when no phase ran (e.g. the preflight Exit path).
+        if timer.records:
+            console.print(timer.summary_table())
+
+
+@app.command()
+def rollback(
+    cluster_name: str = typer.Argument(..., help="The name of the cluster to be rolled back"),
+    region: str = typer.Argument(..., help="The AWS region where the target cluster resides"),
+    force: bool = typer.Option(
+        default=False,
+        help="Bypass ERROR/UNKNOWN rollback readiness insights (server prerequisites still apply)",
+    ),
+    interactive: bool = typer.Option(default=True, help="If enabled, prompt the user for confirmations"),
+) -> None:
+    """Roll the cluster back one minor version (within 7 days of an in-place upgrade).
+
+    Order is the REVERSE of an upgrade, per the version skew policy (kubelet
+    must never be newer than the apiserver): managed node groups are rolled
+    back first, then the control plane. EKS never rolls back addons or
+    self-managed nodes — those are reported for manual action.
+    """
+    is_ca_present: bool = False
+    ca_paused: bool = False
+    ca_replicas_value: int = 0
+    ca_name: str = "cluster-autoscaler"
+    ca_namespace: str = "kube-system"
+    timer = PhaseTimer()
+
+    try:
+        target_cluster: Cluster = Cluster.get(cluster_name=cluster_name, region=region)
+        # The rollback target is always exactly N-1; set it before anything
+        # derives from target_version (nodegroup targets, addon listings).
+        previous_version = _previous_minor(target_cluster.version)
+        target_cluster.target_version = previous_version
+        echo_info(
+            f"Rolling back cluster: {cluster_name} from version: {target_cluster.version} to {previous_version}..."
+        )
+
+        if not target_cluster.active:
+            echo_error(f"The cluster is not active! Status: {target_cluster.status}")
+            raise ClusterInactiveException("The cluster is not active")
+
+        # Advisory readiness gate: ERROR/UNKNOWN insights block unless --force;
+        # a failed fetch never blocks (EKS re-validates server-side).
+        readiness = get_rollback_readiness(target_cluster)
+        if readiness.blocking and not force:
+            echo_error(
+                f"Rollback readiness insights report blocking issues: {readiness.blocking}. "
+                "Resolve them or re-run with --force."
+            )
+            raise typer.Exit(code=1)
+
+        _incompatible = incompatible_addons(target_cluster)
+        if _incompatible:
+            echo_warning(
+                f"Addon versions not offered for {previous_version}: {_incompatible} — EKS does NOT roll back "
+                "addons; downgrade them before the control plane rollback."
+            )
+
+        if interactive:
+            confirm(f"Are you sure you want to roll back: {cluster_name} to {previous_version}?")
+
+        is_ca_present, ca_replicas_value, ca_name, ca_namespace = is_cluster_auto_scaler_present(
+            cluster_name=cluster_name, region=region
+        )
+        if is_ca_present:
+            cluster_auto_enable_disable(
+                cluster_name=cluster_name,
+                operation="pause",
+                mx_val=ca_replicas_value,
+                region=region,
+                name=ca_name,
+                namespace=ca_namespace,
+            )
+            ca_paused = True
+            echo_info(f"Paused the Cluster AutoScaler ({ca_name} in {ca_namespace})")
+
+        # Worker nodes FIRST (version skew), then the control plane.
+        for nodegroup in target_cluster.upgradable_managed_nodegroups:
+            with timer.phase(f"nodegroup rollback: {nodegroup.name}"):
+                nodegroup.update(wait=True)
+
+        managed_nodegroup_asgs: list[str] = []
+        for nodegroup in target_cluster.nodegroups:
+            managed_nodegroup_asgs += nodegroup.autoscaling_group_names
+        self_managed_asgs = list(set(target_cluster.asg_names) - set(managed_nodegroup_asgs))
+        if self_managed_asgs:
+            echo_warning(
+                f"Self-managed node groups are NOT rolled back by this tool or EKS: {self_managed_asgs} — "
+                "revert their AMIs manually before the control plane rollback."
+            )
+
+        with timer.phase("Control plane rollback"):
+            target_cluster.rollback_cluster(wait=True, force=force)
+
+        # Alias-based EC2NodeClasses re-resolve to the previous version's AMI
+        # after the control plane rollback, so Karpenter nodes drift back.
+        is_karpenter, karpenter_replicas, karpenter_namespace = is_karpenter_present(
+            cluster_name=cluster_name, region=region
+        )
+        if is_karpenter and karpenter_replicas == 0:
+            echo_warning(
+                f"Karpenter in namespace: {karpenter_namespace} is scaled to 0 replicas — drift cannot occur; "
+                "skipping the drift wait. Scale the controller up and check NodeClaims manually."
+            )
+        elif is_karpenter:
+            echo_info("Handling Karpenter node rollback via drift...")
+            with timer.phase("Karpenter drift"):
+                drift_result = handle_karpenter_drift(
+                    cluster_name=cluster_name, region=region, target_version=previous_version
+                )
+            if drift_result == "timeout":
+                echo_warning("Karpenter drift did not complete within the timeout; check NodeClaims")
+
+        echo_info(f"EKS Cluster {cluster_name} ROLLED BACK TO {previous_version}")
+    except typer.Abort:
+        echo_warning("Cluster rollback aborted!")
+    except typer.Exit:
+        raise
+    except Exception as error:
+        echo_error(f"Exception encountered! Error: {error}")
+        raise typer.Exit(code=1) from error
+    finally:
+        # Same contract as upgrade: the CA resume must also run on
+        # KeyboardInterrupt/SystemExit, so it lives in finally.
+        if ca_paused:
+            try:
+                cluster_auto_enable_disable(
+                    cluster_name=cluster_name,
+                    operation="start",
+                    mx_val=ca_replicas_value,
+                    region=region,
+                    name=ca_name,
+                    namespace=ca_namespace,
+                )
+                echo_info("Cluster Autoscaler is Enabled Again")
+            except Exception as resume_error:
+                echo_error(
+                    f"Cluster Autoscaler re-enable failed and must be done manually! Error: {resume_error}",
+                )
         if timer.records:
             console.print(timer.summary_table())
 
