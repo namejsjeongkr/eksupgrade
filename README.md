@@ -276,8 +276,10 @@ versions are listed — downgrade them first) and **self-managed node groups**.
   rewritten** — update their `amiSelectorTerms` manually to upgrade those nodes.
 - `--force` deletes pods bypassing PodDisruptionBudgets (this is inherent to
   `--force`).
-- The self-managed ASG path still uses the deprecated `CreateLaunchConfiguration`
-  API (migration to Launch Templates is planned).
+- Launch-template ASGs (direct or MixedInstancesPolicy) get a new template
+  version with the target AMI. Launch-configuration ASGs still use the legacy
+  LC-copy path — new AWS accounts cannot create launch configurations, so
+  migrate those ASGs to launch templates.
 
 ## License
 

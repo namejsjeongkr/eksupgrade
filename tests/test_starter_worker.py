@@ -95,7 +95,7 @@ def test_managed_branch_failure_also_marks_task_done(mock_update):
 @patch("eksupgrade.starter.worker_terminate")
 @patch("eksupgrade.starter.find_node")
 @patch("eksupgrade.starter.get_num_of_instances", return_value=2)
-@patch("eksupgrade.starter.outdated_lt", return_value=["i-old"])
+@patch("eksupgrade.starter.get_outdated_instance_ids", return_value=["i-old"])
 @patch("eksupgrade.starter.get_outdated_asg", return_value=False)
 @patch("eksupgrade.starter.get_latest_ami", return_value="ami-new")
 @patch("eksupgrade.starter.get_ami_name", return_value=("amazon linux 2", "amazon-eks-node-1.36"))
@@ -103,7 +103,7 @@ def test_node_vanishing_mid_check_fails_bounded_not_infinite(
     mock_ami_name,
     mock_latest_ami,
     mock_outdated_asg,
-    mock_outdated_lt,
+    mock_outdated_ids,
     mock_num,
     mock_find_node,
     mock_terminate,
@@ -136,7 +136,7 @@ def test_node_vanishing_mid_check_fails_bounded_not_infinite(
 @patch("eksupgrade.starter.get_latest_instance", return_value="i-new")
 @patch("eksupgrade.starter.add_node")
 @patch("eksupgrade.starter.get_num_of_instances", side_effect=[2, 2])
-@patch("eksupgrade.starter.outdated_lt", return_value=["i-old-1", "i-old-2"])
+@patch("eksupgrade.starter.get_outdated_instance_ids", return_value=["i-old-1", "i-old-2"])
 @patch("eksupgrade.starter.get_outdated_asg", return_value=False)
 @patch("eksupgrade.starter.get_latest_ami", return_value="ami-new")
 @patch("eksupgrade.starter.get_ami_name", return_value=("amazon linux 2", "amazon-eks-node-1.36"))
@@ -144,7 +144,7 @@ def test_surge_adds_a_node_only_when_no_fresh_instance_exists(
     mock_ami_name,
     mock_latest_ami,
     mock_outdated_asg,
-    mock_outdated_lt,
+    mock_outdated_ids,
     mock_num,
     mock_add_node,
     mock_latest_instance,
