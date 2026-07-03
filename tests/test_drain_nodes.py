@@ -20,7 +20,7 @@ NODE = "ip-10-0-1-1.ec2.internal"
 
 _LOADING = "eksupgrade.src.k8s_client.loading_config"
 _K8S = "eksupgrade.src.k8s_client.client"
-_WATCHER = "eksupgrade.src.k8s_client.watcher"
+_WATCHER = "eksupgrade.src.k8s_client._wait_for_pod_gone"
 
 
 def _owner_ref(kind: str) -> MagicMock:

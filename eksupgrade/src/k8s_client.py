@@ -12,7 +12,7 @@ from typing import Any
 
 import boto3
 from botocore.signers import RequestSigner
-from kubernetes import client, watch
+from kubernetes import client
 from kubernetes.client import V1Eviction
 from kubernetes.client.rest import ApiException
 
@@ -64,8 +64,24 @@ def _ca_cert_path(endpoint: str, ca_data_b64: str) -> str:
     return path
 
 
+# Cache the loaded kubernetes config per (cluster, region): every helper in this
+# module calls loading_config(), and rebuilding it costs a describe_cluster plus
+# an STS presigned token EVERY time — draining one node with N pods used to cost
+# ~N AWS round-trips. The STS token is valid for 15 minutes; refresh well before.
+_CONFIG_STATE: dict[str, Any] = {"key": None, "expires": 0.0}
+CONFIG_TTL: int = 600
+
+
 def loading_config(cluster_name: str, region: str) -> str:
-    """Configure the default kubernetes client from EKS describe-cluster (CA + STS bearer token)."""
+    """Configure the default kubernetes client from EKS describe-cluster (CA + STS bearer token).
+
+    The result is cached for CONFIG_TTL seconds per (cluster, region) and only
+    rebuilt on expiry or when a different cluster is requested.
+    """
+    key = (cluster_name, region)
+    if _CONFIG_STATE["key"] == key and time.monotonic() < _CONFIG_STATE["expires"]:
+        return "Initialized"
+
     eks = boto3.client("eks", region_name=region)
     resp = eks.describe_cluster(name=cluster_name)
     endpoint = resp["cluster"]["endpoint"]
@@ -77,6 +93,8 @@ def loading_config(cluster_name: str, region: str) -> str:
     configs.debug = False
     configs.api_key = {"authorization": "Bearer " + get_bearer_token(cluster_name, region)}
     client.Configuration.set_default(configs)
+    _CONFIG_STATE["key"] = key
+    _CONFIG_STATE["expires"] = time.monotonic() + CONFIG_TTL
     return "Initialized"
 
 
@@ -96,25 +114,27 @@ def unschedule_old_nodes(cluster_name: str, node_name: str, region: str) -> None
     return
 
 
-def watcher(cluster_name: str, name: str, region: str) -> bool:
-    """Watch whether the pod is deleted or not."""
-    loading_config(cluster_name, region)
-    core_v1_api = client.CoreV1Api()
-    _watcher = watch.Watch()
+POD_DELETION_WAIT: int = 60
 
-    try:
-        for event in _watcher.stream(core_v1_api.list_pod_for_all_namespaces, timeout_seconds=30):
-            echo_info(f"{event['type']} {event['object'].metadata.name}")
 
-            if event["type"] == "DELETED" and event["object"].metadata.name == name:
-                _watcher.stop()
+def _wait_for_pod_gone(core_v1_api, name: str, namespace: str, timeout: int = POD_DELETION_WAIT) -> bool:
+    """Poll the ONE evicted pod until it is deleted (404), kubectl-style.
+
+    Replaces the legacy watch that streamed every pod in the cluster for 30s
+    per eviction — a single scoped read every couple of seconds is cheaper and
+    quieter on large clusters.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            core_v1_api.read_namespaced_pod(name=name, namespace=namespace)
+        except ApiException as api_error:
+            if api_error.status == 404:
                 return True
-        return False
-    except Exception as e:
-        echo_error(
-            f"Exception encountered in watcher method against cluster: {cluster_name} name: {name} Error: {e}",
-        )
-        raise e
+            raise
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(2)
 
 
 MAX_EVICTION_RETRIES = 3
@@ -174,7 +194,7 @@ def _evict_pod(
                 time.sleep(PDB_RETRY_INTERVAL)
                 continue
             raise
-        if watcher(cluster_name, pod.metadata.name, region):
+        if _wait_for_pod_gone(core_v1_api, pod.metadata.name, pod.metadata.namespace):
             return
         watch_misses += 1
     echo_error(
