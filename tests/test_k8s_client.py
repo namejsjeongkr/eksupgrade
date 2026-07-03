@@ -48,3 +48,31 @@ def test_loading_config_sets_cluster_ca() -> None:
     assert cfg.ssl_ca_cert is not None
     with open(cfg.ssl_ca_cert, "rb") as fh:
         assert fh.read() == fake_ca_pem
+
+
+@patch("eksupgrade.src.k8s_client.client")
+@patch("eksupgrade.src.k8s_client.loading_config")
+def test_find_node_tolerates_missing_provider_id(mock_loading, mock_k8s):
+    """A node still registering can have spec.provider_id=None — find_node must
+    skip it instead of crashing with AttributeError on None.split()."""
+    from unittest.mock import MagicMock
+
+    from eksupgrade.src.k8s_client import find_node
+
+    node_registering = MagicMock()
+    node_registering.spec.provider_id = None
+    node_registering.metadata.name = "n-registering"
+
+    node_ready = MagicMock()
+    node_ready.spec.provider_id = "aws:///ap-northeast-2a/i-123"
+    node_ready.metadata.name = "n-ready"
+    node_ready.status.node_info.kube_proxy_version = "v1.36.0-eks-abc"
+    node_ready.status.node_info.kubelet_version = "v1.36.0-eks-abc"
+    node_ready.status.node_info.os_image = "Bottlerocket OS 1.62.0"
+
+    response = MagicMock()
+    response.items = [node_registering, node_ready]
+    mock_k8s.CoreV1Api.return_value.list_node.return_value = response
+
+    assert find_node("my-cluster", "i-123", "find", "us-east-1") == "n-ready"
+    assert find_node("my-cluster", "i-999", "find", "us-east-1") == "NAN"

@@ -118,7 +118,7 @@ def main(
     region: str,
     max_retry: int = 2,
     force: bool = False,
-    preflight: bool = True,
+    preflight: bool = False,  # run read-only checks and exit (no upgrade)
     parallel: bool = False,
     latest_addons: bool = False,
     disable_checks: bool = False,
@@ -128,9 +128,10 @@ def main(
 
 **Workflow**:
 1. Initialize AWS session and Cluster object
-2. Validate cluster state (ACTIVE, not UPDATING)
-3. Interactive confirmation prompt (if enabled)
-4. Upgrade control plane
+2. If `--preflight`: run read-only checks (src/preflight.py) and exit with 0/1/2 — no upgrade
+3. Validate cluster state (ACTIVE, not UPDATING)
+4. Interactive confirmation prompt (if enabled)
+5. Upgrade control plane
 5. Wait for control plane upgrade completion
 6. Upgrade add-ons (vpc-cni, kube-proxy, coredns)
 7. Upgrade managed node groups
