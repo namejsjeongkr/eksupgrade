@@ -122,9 +122,9 @@ def add_node(asg_name: str, region: str) -> None:
         raise Exception("Error Index out of bound due to no max capacity field")
 
     if int(old_capacity_des) >= int(old_capacity_mx):
-        asg_client.update_auto_scaling_group(
-            AutoScalingGroupName=asg_name, MaxSize=(int(old_capacity_mx) + int(old_capacity_des))
-        )
+        # Grow MaxSize by exactly the one node being added — the legacy
+        # max+desired formula permanently inflated MaxSize (it is never restored).
+        asg_client.update_auto_scaling_group(AutoScalingGroupName=asg_name, MaxSize=int(old_capacity_des) + 1)
 
     old_capacity = response["AutoScalingGroups"][0]["DesiredCapacity"]
     new_capacity = old_capacity + 1
