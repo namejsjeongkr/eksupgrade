@@ -1,18 +1,11 @@
-"""The EKS Upgrade kubernetes client module.
-
-Attributes:
-    queue (queue.Queue): The queue used for executing jobs (status checks, etc).
-
-"""
+"""The EKS Upgrade kubernetes client module."""
 
 from __future__ import annotations
 
 import base64
 import os
-import queue
 import re
 import tempfile
-import threading
 import time
 from functools import cache
 from typing import Any
@@ -26,33 +19,6 @@ from kubernetes.client.rest import ApiException
 from eksupgrade.utils import echo_error, echo_info, echo_warning, get_logger
 
 logger = get_logger(__name__)
-
-queue = queue.Queue()
-
-
-class StatsWorker(threading.Thread):
-    def __init__(self, queue, id):
-        threading.Thread.__init__(self)
-        self.queue = queue
-        self.id = id
-
-    def run(self):
-        while self.queue.not_empty:
-            cluster_name, namespace, new_pod_name, _, region = self.queue.get()
-            status = addon_status(
-                cluster_name=cluster_name,
-                new_pod_name=new_pod_name,
-                region=region,
-                namespace=namespace,
-            )
-            # signals to queue job is done
-            if not status:
-                echo_error(
-                    f"Pod not started! Cluster: {cluster_name} - Namespace: {namespace} - New Pod: {new_pod_name}"
-                )
-                raise Exception("Pod Not Started", new_pod_name)
-
-            self.queue.task_done()
 
 
 def get_bearer_token(cluster_id: str, region: str) -> str:
@@ -359,6 +325,10 @@ def find_node(cluster_name: str, instance_id: str, operation: str, region: str) 
         return "NAN"
 
     for node in response.items:
+        # A node still registering can have no providerID yet — skip it instead
+        # of crashing on None.split().
+        if not node.spec.provider_id:
+            continue
         nodes.append(
             [
                 node.spec.provider_id.split("/")[-1],
@@ -382,68 +352,6 @@ def find_node(cluster_name: str, instance_id: str, operation: str, region: str) 
                 return i[-1]
         return "NAN"
     return "NAN"
-
-
-def addon_status(cluster_name: str, new_pod_name: str, region: str, namespace: str) -> bool:
-    """Get the status of an addon pod."""
-    loading_config(cluster_name, region)
-    core_v1_api = client.CoreV1Api()
-    tts = 100
-    now = time.time()
-
-    while time.time() < now + tts:
-        response = core_v1_api.read_namespaced_pod_status(name=new_pod_name, namespace=namespace)
-        if response.status.container_statuses[0].ready and response.status.container_statuses[0].started:
-            return True
-    return False
-
-
-def sort_pods(
-    cluster_name: str,
-    region: str,
-    original_name: str,
-    pod_name: str,
-    old_pods_names: list[str],
-    namespace: str,
-    count: int = 90,
-) -> str:
-    """Sort the pod results."""
-    if not count:
-        echo_error(
-            f"Pod has no associated new pod! Cluster: {cluster_name} - Namespace: {namespace} - Pod Name: {pod_name}",
-        )
-        raise Exception("Pod has No associated New Launch")
-
-    pods_nodes = []
-    loading_config(cluster_name, region)
-    core_v1_api = client.CoreV1Api()
-    try:
-        if pod_name == "cluster-autoscaler":
-            pod_list = core_v1_api.list_namespaced_pod(namespace=namespace, label_selector=f"app={pod_name}")
-        else:
-            pod_list = core_v1_api.list_namespaced_pod(namespace=namespace, label_selector=f"k8s-app={pod_name}")
-    except Exception as e:
-        echo_error(
-            f"Exception encountered while attempting to get the pod list and sort_pods - cluster: {cluster_name}, error: {e}",
-        )
-        return "Not Found"
-
-    echo_info(f"Total Pods With {pod_name} = {len(pod_list.items)}")
-    for i in pod_list.items:
-        pods_nodes.append([i.metadata.name, i.metadata.creation_timestamp])
-
-    if pods_nodes:
-        new_pod_name = sorted(pods_nodes, key=lambda x: x[1])[-1][0]
-    else:
-        count -= 1
-        sort_pods(cluster_name, region, original_name, pod_name, old_pods_names, namespace, count)
-        # TODO: Remove this.  Adding to resolve possible use before assignment below.
-        new_pod_name = ""
-
-    if original_name != new_pod_name and new_pod_name in old_pods_names:
-        count -= 1
-        sort_pods(cluster_name, region, original_name, pod_name, old_pods_names, namespace, count)
-    return new_pod_name
 
 
 @cache
