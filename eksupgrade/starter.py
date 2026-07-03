@@ -108,7 +108,14 @@ def actual_update(cluster_name, asg_iter, to_update, region, max_retry, forced):
             echo_info(f"Total Instance count = {before_count}")
             add_time = datetime.datetime.now(datetime.timezone.utc)
 
-            if abs(before_count - len(outdated_instances)) != len(outdated_instances):
+            # Surge: ensure at least one FRESH (non-outdated) instance exists
+            # before draining this node, adding one only when needed. The legacy
+            # abs(count - outdated) != outdated formula also re-added on later
+            # iterations when the replacement from the previous round already
+            # provided the surge capacity.
+            remaining_outdated = len(outdated_instances) - len(terminated_ids)
+            fresh_count = before_count - remaining_outdated
+            if fresh_count < 1:
                 add_node(asg_iter, region)
                 time.sleep(45)
                 latest_instance = get_latest_instance(asg_name=asg_iter, add_time=add_time, region=region)
