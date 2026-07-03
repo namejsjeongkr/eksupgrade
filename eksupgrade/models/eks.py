@@ -751,7 +751,10 @@ class Cluster(EksResource):
     def current_addons(self) -> list[str]:
         """Return a list of addon names currently installed in the cluster."""
         echo_info(f"Getting the list of current cluster addons for cluster: {self.name}...")
-        return self.eks_client.list_addons(clusterName=self.name).get("addons", [])
+        addons: list[str] = []
+        for page in self.eks_client.get_paginator("list_addons").paginate(clusterName=self.name):
+            addons += page.get("addons", [])
+        return addons
 
     @property
     def cluster_name(self) -> str:
@@ -962,10 +965,13 @@ class Cluster(EksResource):
 
         """
         cluster_tag = f"kubernetes.io/cluster/{self.name}"
-        response = self.autoscaling_client.describe_auto_scaling_groups(
-            Filters=[{"Name": "tag-key", "Values": [cluster_tag]}]
-        ).get("AutoScalingGroups", [])
-        return [AutoscalingGroup.get(asg_data=asg, region=self.region, cluster=self) for asg in response]
+        # Paginate: describe_auto_scaling_groups returns at most 50 records per
+        # page, so clusters with many tagged ASGs would silently lose the rest.
+        asg_data_list: list[AutoScalingGroupTypeDef] = []
+        paginator = self.autoscaling_client.get_paginator("describe_auto_scaling_groups")
+        for page in paginator.paginate(Filters=[{"Name": "tag-key", "Values": [cluster_tag]}]):
+            asg_data_list += page.get("AutoScalingGroups", [])
+        return [AutoscalingGroup.get(asg_data=asg, region=self.region, cluster=self) for asg in asg_data_list]
 
     @cached_property
     def asg_names(self) -> list[str]:
@@ -983,8 +989,10 @@ class Cluster(EksResource):
     @cached_property
     def nodegroup_names(self) -> list[str]:
         """Get the cluster's associated nodegroups."""
-        response: ListNodegroupsResponseTypeDef = self.eks_client.list_nodegroups(clusterName=self.name, maxResults=100)
-        return response["nodegroups"]
+        names: list[str] = []
+        for page in self.eks_client.get_paginator("list_nodegroups").paginate(clusterName=self.name):
+            names += page.get("nodegroups", [])
+        return names
 
     @cached_property
     def nodegroups(self) -> list[ManagedNodeGroup]:

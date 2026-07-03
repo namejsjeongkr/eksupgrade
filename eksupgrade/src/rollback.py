@@ -49,11 +49,17 @@ class RollbackReadiness:
 def get_rollback_readiness(cluster) -> RollbackReadiness:
     """Fetch and render the cluster's ROLLBACK_READINESS insights."""
     try:
-        response = cluster.eks_client.list_insights(
-            clusterName=cluster.name,
-            filter={"categories": ["ROLLBACK_READINESS"]},
-        )
-        insights = response.get("insights", [])
+        # Manual nextToken loop (not get_paginator) so older botocore versions
+        # without a registered list_insights paginator still work.
+        insights = []
+        kwargs: dict = {"clusterName": cluster.name, "filter": {"categories": ["ROLLBACK_READINESS"]}}
+        while True:
+            response = cluster.eks_client.list_insights(**kwargs)
+            insights += response.get("insights", [])
+            next_token = response.get("nextToken")
+            if not next_token:
+                break
+            kwargs["nextToken"] = next_token
     except Exception as error:  # noqa: BLE001 - advisory only; the server re-validates
         echo_warning(
             f"Could not fetch rollback readiness insights ({error}); "
