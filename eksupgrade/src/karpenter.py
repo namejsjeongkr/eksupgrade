@@ -73,6 +73,12 @@ def _is_nodeclaim_drifted(nodeclaim: dict) -> bool:
     return any(c.get("type") == "Drifted" and c.get("status") == "True" for c in conditions)
 
 
+def _nodeclaim_nodepool(nodeclaim: dict) -> str | None:
+    """Return the NodePool a NodeClaim belongs to (karpenter.sh/nodepool label)."""
+    labels = nodeclaim.get("metadata", {}).get("labels", {}) or {}
+    return labels.get("karpenter.sh/nodepool")
+
+
 def _list_nodeclaims(custom_api) -> list[dict]:
     """List all Karpenter NodeClaim objects (karpenter.sh/v1)."""
     response = custom_api.list_cluster_custom_object(
@@ -160,7 +166,14 @@ def wait_for_karpenter_drift(
 
     while True:
         nodeclaims = _list_nodeclaims(custom_api)
-        drifted = [nc["metadata"]["name"] for nc in nodeclaims if _is_nodeclaim_drifted(nc)]
+        # Scope the Drifted check to the drifting NodePools, like the node check
+        # below: a NodeClaim from a pinned-class pool (or one Drifted for an
+        # unrelated spec change) is out of scope and must not hold the wait open.
+        drifted = [
+            nc["metadata"]["name"]
+            for nc in nodeclaims
+            if _is_nodeclaim_drifted(nc) and (nodepools is None or _nodeclaim_nodepool(nc) in nodepools)
+        ]
         off_target = _karpenter_nodes_off_target(core_v1_api, target_version, nodepools)
 
         if not drifted and not off_target:

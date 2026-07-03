@@ -60,10 +60,13 @@ class TestClassifyAmiSelector:
         assert classify_ami_selector({"spec": {}}) == "pinned"
 
 
-def _nodeclaim(name: str, drifted: bool) -> dict:
+def _nodeclaim(name: str, drifted: bool, nodepool: str = "default") -> dict:
     """Build a NodeClaim custom-object dict with/without a Drifted condition."""
     conditions = [{"type": "Drifted", "status": "True"}] if drifted else []
-    return {"metadata": {"name": name}, "status": {"conditions": conditions}}
+    return {
+        "metadata": {"name": name, "labels": {"karpenter.sh/nodepool": nodepool}},
+        "status": {"conditions": conditions},
+    }
 
 
 def _karpenter_node(name: str, kubelet_version: str, nodepool: str = "default") -> MagicMock:
@@ -158,6 +161,48 @@ class TestWaitForKarpenterDrift:
         ]
 
         assert wait_for_karpenter_drift(CLUSTER, REGION, "1.34", timeout=30, poll_interval=5) is True
+
+    @patch("eksupgrade.src.karpenter.time.sleep", return_value=None)
+    @patch("eksupgrade.src.karpenter.time.monotonic")
+    @patch(_K8S)
+    @patch(_LOADING)
+    def test_out_of_scope_drifted_nodeclaim_does_not_hold_wait(
+        self, mock_loading, mock_k8s, mock_monotonic, mock_sleep
+    ):
+        """A Drifted NodeClaim from a NON-drifting NodePool (pinned class, or drifted
+        for an unrelated spec change) is out of scope and must not hold the wait
+        open — the off_target node check is scoped, so the NodeClaim check must be too."""
+        mock_monotonic.side_effect = [0, 1, 1000]
+        api = mock_k8s.CustomObjectsApi.return_value
+        api.list_cluster_custom_object.return_value = {
+            "items": [_nodeclaim("nc-pinned", drifted=True, nodepool="np-pinned")]
+        }
+        core = mock_k8s.CoreV1Api.return_value
+        core.list_node.return_value = _node_list(_karpenter_node("n-alias", "v1.34.0", nodepool="np-alias"))
+
+        assert (
+            wait_for_karpenter_drift(CLUSTER, REGION, "1.34", nodepools={"np-alias"}, timeout=30, poll_interval=5)
+            is True
+        )
+
+    @patch("eksupgrade.src.karpenter.time.sleep", return_value=None)
+    @patch("eksupgrade.src.karpenter.time.monotonic")
+    @patch(_K8S)
+    @patch(_LOADING)
+    def test_in_scope_drifted_nodeclaim_still_holds_wait(self, mock_loading, mock_k8s, mock_monotonic, mock_sleep):
+        """A Drifted NodeClaim that IS in a drifting NodePool must keep the wait open."""
+        mock_monotonic.side_effect = [0, 1, 1000]
+        api = mock_k8s.CustomObjectsApi.return_value
+        api.list_cluster_custom_object.return_value = {
+            "items": [_nodeclaim("nc-alias", drifted=True, nodepool="np-alias")]
+        }
+        core = mock_k8s.CoreV1Api.return_value
+        core.list_node.return_value = _node_list(_karpenter_node("n-alias", "v1.34.0", nodepool="np-alias"))
+
+        assert (
+            wait_for_karpenter_drift(CLUSTER, REGION, "1.34", nodepools={"np-alias"}, timeout=30, poll_interval=5)
+            is False
+        )
 
     @patch("eksupgrade.src.karpenter.time.sleep", return_value=None)
     @patch("eksupgrade.src.karpenter.time.monotonic")
