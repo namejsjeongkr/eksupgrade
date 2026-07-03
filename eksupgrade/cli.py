@@ -158,10 +158,18 @@ def main(
 
         # checking Karpenter present — the controller is left RUNNING so its
         # native Drift can replace nodes capacity-first after the control plane upgrade.
-        is_karpenter, _karpenter_replicas, karpenter_namespace = is_karpenter_present(
+        is_karpenter, karpenter_replicas, karpenter_namespace = is_karpenter_present(
             cluster_name=cluster_name, region=region
         )
-        if is_karpenter:
+        if is_karpenter and karpenter_replicas == 0:
+            # A controller at 0 replicas cannot mark or replace anything — waiting
+            # for drift would just burn the full timeout.
+            echo_warning(
+                f"Karpenter in namespace: {karpenter_namespace} is scaled to 0 replicas — drift cannot occur; "
+                "skipping the drift wait. Scale the controller up and check NodeClaims manually."
+            )
+            is_karpenter = False
+        elif is_karpenter:
             echo_info(f"Karpenter detected in namespace: {karpenter_namespace} (left running for drift)")
         else:
             echo_info("No Karpenter is Found")
