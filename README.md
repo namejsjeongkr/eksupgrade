@@ -189,9 +189,20 @@ eksupgrade --help
 ```
 
 ```sh
- Usage: eksupgrade [OPTIONS] CLUSTER_NAME CLUSTER_VERSION REGION
+ Usage: eksupgrade [OPTIONS] COMMAND [ARGS]...
 
- Run eksupgrade against a target cluster.
+ Commands:
+   upgrade    Upgrade a target cluster to the next Kubernetes version.
+   rollback   Roll the cluster back one minor version (within 7 days of an
+              in-place upgrade).
+
+ Options:
+   --version                   Show the version and exit
+   --help                      Show this message and exit
+```
+
+```sh
+ Usage: eksupgrade upgrade [OPTIONS] CLUSTER_NAME CLUSTER_VERSION REGION
 
  Arguments:
    cluster_name      The name of the cluster to be upgraded   [required]
@@ -204,28 +215,51 @@ eksupgrade --help
    --parallel                  Upgrade node groups in parallel
    --latest-addons             Use the latest eligible add-on versions
    --interactive               Prompt for confirmation        [default: on]
-   --version                   Show the version and exit
    --help                      Show this message and exit
 ```
 
 Example:
 
 ```sh
-eksupgrade my-cluster 1.35 ap-northeast-2
+eksupgrade upgrade my-cluster 1.35 ap-northeast-2
 ```
+
+> **Breaking change**: earlier releases were invoked without a subcommand
+> (`eksupgrade <cluster> <version> <region>`). The upgrade flow now lives
+> under `eksupgrade upgrade ...`.
 
 ### Read-only preflight
 
 Run a read-only assessment without changing anything:
 
 ```sh
-eksupgrade <cluster> <target-version> <region> --preflight --no-interactive
+eksupgrade upgrade <cluster> <target-version> <region> --preflight --no-interactive
 ```
 
 It checks the control plane, add-ons, managed node groups, Karpenter, and
 PodDisruptionBudget coverage (warning on replicas≥2 workloads with no PDB), prints
 a summary report, and exits without performing any upgrade. Exit codes: `0` safe
 (warnings allowed), `1` blocking issues found, `2` the checks could not run.
+
+### Version rollback
+
+Roll a cluster back one minor version within 7 days of an in-place upgrade
+(EKS version rollback, 2026-07):
+
+```sh
+eksupgrade rollback <cluster> <region>
+```
+
+The target is always N-1 (computed from the current version). The order is the
+reverse of an upgrade, per the version skew policy: managed node groups are
+rolled back first, then the control plane; Karpenter alias-based nodes drift
+back afterwards. Before anything mutates, the cluster's `ROLLBACK_READINESS`
+insights are shown — `ERROR`/`UNKNOWN` findings block unless `--force` (which
+bypasses insight checks only; EKS still enforces the 7-day window, the
+in-place-upgrade requirement, and sequential rollback server-side).
+
+Not rolled back (reported for manual action): **add-ons** (incompatible
+versions are listed — downgrade them first) and **self-managed node groups**.
 
 ## Known limitations
 
