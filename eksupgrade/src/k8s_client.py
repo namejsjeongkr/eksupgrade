@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import atexit
 import base64
 import os
 import re
 import tempfile
 import time
-from functools import cache
 from typing import Any
 
 import boto3
@@ -28,7 +28,10 @@ def get_bearer_token(cluster_id: str, region: str) -> str:
 
     sts_client = session.client("sts", region_name=region)
     service_id = sts_client.meta.service_model.service_id
-    signer = RequestSigner(service_id, region, "sts", "v4", session.get_credentials(), session.events)
+    credentials = session.get_credentials()
+    if credentials is None:
+        raise Exception("No AWS credentials found to generate the EKS bearer token")
+    signer = RequestSigner(service_id, region, "sts", "v4", credentials, session.events)
 
     params = {
         "method": "GET",
@@ -62,6 +65,19 @@ def _ca_cert_path(endpoint: str, ca_data_b64: str) -> str:
         fh.write(base64.b64decode(ca_data_b64))
     _CA_CERT_FILES[endpoint] = path
     return path
+
+
+def _cleanup_ca_cert_files() -> None:
+    """Remove the temp CA PEM files written by _ca_cert_path (registered atexit)."""
+    for path in _CA_CERT_FILES.values():
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    _CA_CERT_FILES.clear()
+
+
+atexit.register(_cleanup_ca_cert_files)
 
 
 # Cache the loaded kubernetes config per (cluster, region): every helper in this
@@ -372,59 +388,6 @@ def find_node(cluster_name: str, instance_id: str, operation: str, region: str) 
                 return i[-1]
         return "NAN"
     return "NAN"
-
-
-@cache
-def get_addon_details(cluster_name: str, addon: str, region: str) -> dict[str, Any]:
-    """Get addon details which includes its current version."""
-    eks_client = boto3.client("eks", region_name=region)
-    addon_details: dict[str, Any] = eks_client.describe_addon(clusterName=cluster_name, addonName=addon).get(
-        "addon", {}
-    )
-    return addon_details
-
-
-@cache
-def get_addon_update_kwargs(cluster_name: str, addon: str, region: str) -> dict[str, Any]:
-    """Get kwargs for subsequent update to addon."""
-    addon_details: dict[str, Any] = get_addon_details(cluster_name, addon, region)
-    kwargs: dict[str, Any] = {}
-    iam_role_arn: str | None = addon_details.get("serviceAccountRoleArn")
-    config_values: str | None = addon_details.get("configurationValues")
-
-    if iam_role_arn:
-        kwargs["serviceAccountRoleArn"] = iam_role_arn
-    if config_values:
-        kwargs["configurationValues"] = config_values
-    return kwargs
-
-
-@cache
-def get_addon_versions(version: str, region: str) -> list[dict[str, Any]]:
-    """Get addon versions for the associated Kubernetes `version`."""
-    eks_client = boto3.client("eks", region_name=region)
-    addon_versions: list[dict[str, Any]] = eks_client.describe_addon_versions(kubernetesVersion=version).get(
-        "addons", []
-    )
-    return addon_versions
-
-
-@cache
-def get_versions_by_addon(addon: str, version: str, region: str) -> dict[str, Any]:
-    """Get target addon versions."""
-    addon_versions: list[dict[str, Any]] = get_addon_versions(version, region)
-    return next(item for item in addon_versions if item["addonName"] == addon)
-
-
-@cache
-def get_default_version(addon: str, version: str, region: str) -> str:
-    """Get the EKS default version of the `addon`."""
-    addon_dict: dict[str, Any] = get_versions_by_addon(addon, version, region)
-    return next(
-        item["addonVersion"]
-        for item in addon_dict["addonVersions"]
-        if item["compatibilities"][0]["defaultVersion"] is True
-    )
 
 
 def _is_cluster_autoscaler_deployment(deployment) -> bool:

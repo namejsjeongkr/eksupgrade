@@ -3,8 +3,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from kubernetes.client.api.core_v1_api import CoreV1Api
-from kubernetes.client.api_client import ApiClient
 
 from eksupgrade.exceptions import EksException
 from eksupgrade.models.eks import Cluster, ClusterAddon, ManagedNodeGroup
@@ -18,7 +16,9 @@ def test_cluster_resource(eks_client, eks_cluster, cluster_name, region) -> None
     assert cluster_dict
     assert isinstance(cluster_dict, dict)
     assert cluster_dict["version"] == "1.23"
-    assert len(cluster_dict.keys()) == 20
+    # 19 instance attributes: the dataclass fields plus active_waiter — the
+    # removed kube-config bootstrap no longer materializes sts_client at init.
+    assert len(cluster_dict.keys()) == 19
     assert cluster_resource.name == cluster_resource.cluster_name
 
 
@@ -28,13 +28,6 @@ def test_cluster_resource_eks_client(eks_client, eks_cluster, cluster_name, regi
 
     assert cluster_resource.eks_client
     assert cluster_resource.eks_client.meta.region_name == "us-east-1"
-
-
-def test_cluster_resource_core_client(eks_client, eks_cluster, cluster_name, region) -> None:
-    """Test the cluster resource."""
-    cluster_resource = Cluster.get(cluster_name, region)
-    assert isinstance(cluster_resource.core_api_client, CoreV1Api)
-    assert isinstance(cluster_resource.core_api_client.api_client, ApiClient)
 
 
 def test_cluster_addon_resource(eks_client, eks_cluster, cluster_name, region) -> None:
