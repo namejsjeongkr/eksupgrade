@@ -244,6 +244,9 @@ def main(
         # Karpenter is never paused (drift needs the controller running), so there
         # is nothing to re-enable here on error.
         echo_error(f"Exception encountered! Error: {error}")
+        # CI/CD (--no-interactive) relies on the exit code; a swallowed failure
+        # exiting 0 reads as a successful upgrade. Same contract as rollback.
+        raise typer.Exit(code=1) from error
     finally:
         # Resume the Cluster Autoscaler here — and ONLY here — so it also runs on
         # KeyboardInterrupt/SystemExit, which `except Exception` never sees. A

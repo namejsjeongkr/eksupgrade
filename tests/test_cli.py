@@ -329,3 +329,18 @@ def test_rollback_resumes_cluster_autoscaler_on_failure():
     assert result.exit_code != 0
     operations = [call.kwargs.get("operation") for call in mock_toggle.call_args_list]
     assert "start" in operations
+
+
+def test_upgrade_failure_exits_nonzero():
+    """A failed upgrade must NOT exit 0 — CI/CD (--no-interactive) relies on the
+    exit code to detect failure. The legacy handler swallowed the exception."""
+    fake_cluster = _fake_upgradeable_cluster()
+    fake_cluster.upgrade_nodegroups.side_effect = RuntimeError("boom")
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch("eksupgrade.cli.is_cluster_auto_scaler_present", return_value=(False, 0, "", "")),
+        patch("eksupgrade.cli.is_karpenter_present", return_value=(False, 0, "")),
+    ):
+        result = runner.invoke(app, ["upgrade", "c", "1.35", "ap-northeast-2", "--no-interactive"])
+
+    assert result.exit_code != 0
