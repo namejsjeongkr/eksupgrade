@@ -261,6 +261,12 @@ in-place-upgrade requirement, and sequential rollback server-side).
 Not rolled back (reported for manual action): **add-ons** (incompatible
 versions are listed — downgrade them first) and **self-managed node groups**.
 
+> **Karpenter skew window**: drift can only start AFTER the control plane
+> rolls back, so Karpenter nodes briefly run a kubelet one minor NEWER than
+> the apiserver until their drift completes. This is structurally unavoidable
+> (alias AMIs re-resolve off the control-plane version); keep the drift wait
+> in view and check NodeClaims if it times out.
+
 ## Known limitations
 
 - Karpenter logic is covered by unit tests against mocked CRDs. The Karpenter v1
