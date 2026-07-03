@@ -135,12 +135,13 @@ def _ng(name, ami_type, version="1.32"):
 
 
 def test_managed_ng_pass_non_custom() -> None:
+    # AL2023 (not AL2 — AL2 AMIs end at 1.32 and are now blocking past that).
     cluster = MagicMock()
     cluster.version = "1.32"
     cluster.target_version = "1.33"
-    cluster.nodegroups = [_ng("ng-al2", "AL2_x86_64")]
+    cluster.nodegroups = [_ng("ng-al2023", "AL2023_x86_64_STANDARD")]
     findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
-    assert any(f.item == "ng-al2" and f.severity == "pass" for f in findings)
+    assert any(f.item == "ng-al2023" and f.severity == "pass" for f in findings)
 
 
 def test_managed_ng_custom_pass_when_ami_resolves() -> None:
@@ -148,11 +149,22 @@ def test_managed_ng_custom_pass_when_ami_resolves() -> None:
     cluster.version = "1.32"
     cluster.target_version = "1.33"
     cluster.nodegroups = [_ng("ng-br", "CUSTOM")]
-    with patch("eksupgrade.src.preflight.get_latest_ami", return_value="ami-0abc") as mock_ami:
+    with (
+        patch(
+            "eksupgrade.src.preflight._custom_ng_current_image",
+            return_value="amazon/bottlerocket-aws-k8s-1.32-x86_64-v1.32.0",
+        ),
+        patch("eksupgrade.src.preflight.get_latest_ami", return_value="ami-0abc") as mock_ami,
+    ):
         findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
     assert any(f.item == "ng-br" and f.severity == "pass" and "ami-0abc" in f.detail for f in findings)
-    # Argument contract must mirror the working self_managed.py CUSTOM call.
-    mock_ami.assert_called_once_with("1.33", "bottlerocket", "bottlerocket", "ap-northeast-2")
+    # Argument contract must mirror the runtime resolver: the ACTUAL image hint.
+    mock_ami.assert_called_once_with(
+        "1.33",
+        "amazon/bottlerocket-aws-k8s-1.32-x86_64-v1.32.0",
+        "amazon/bottlerocket-aws-k8s-1.32-x86_64-v1.32.0",
+        "ap-northeast-2",
+    )
 
 
 def test_managed_ng_custom_blocking_when_ami_resolve_fails() -> None:
@@ -160,7 +172,13 @@ def test_managed_ng_custom_blocking_when_ami_resolve_fails() -> None:
     cluster.version = "1.32"
     cluster.target_version = "1.33"
     cluster.nodegroups = [_ng("ng-br", "CUSTOM")]
-    with patch("eksupgrade.src.preflight.get_latest_ami", side_effect=RuntimeError("no ami")):
+    with (
+        patch(
+            "eksupgrade.src.preflight._custom_ng_current_image",
+            return_value="amazon/bottlerocket-aws-k8s-1.32-x86_64-v1.32.0",
+        ),
+        patch("eksupgrade.src.preflight.get_latest_ami", side_effect=RuntimeError("no ami")),
+    ):
         findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
     assert any(f.item == "ng-br" and f.severity == "blocking" for f in findings)
 
@@ -180,7 +198,13 @@ def test_managed_ng_custom_ami_resolves_via_real_ssm_path() -> None:
     def _client(service, region_name=None):
         return fake_ssm if service == "ssm" else fake_ec2
 
-    with patch("eksupgrade.src.latest_ami.boto3.client", side_effect=_client):
+    with (
+        patch(
+            "eksupgrade.src.preflight._custom_ng_current_image",
+            return_value="amazon/bottlerocket-aws-k8s-1.32-x86_64-v1.32.0",
+        ),
+        patch("eksupgrade.src.latest_ami.boto3.client", side_effect=_client),
+    ):
         findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
     assert any(f.item == "ng-br" and f.severity == "pass" and "ami-real" in f.detail for f in findings)
     called_names = fake_ssm.get_parameters.call_args.kwargs.get("Names") or fake_ssm.get_parameters.call_args.args[0]
@@ -192,7 +216,13 @@ def test_managed_ng_custom_blocking_when_ami_unresolved() -> None:
     cluster.version = "1.32"
     cluster.target_version = "1.33"
     cluster.nodegroups = [_ng("ng-br", "CUSTOM")]
-    with patch("eksupgrade.src.preflight.get_latest_ami", return_value="NAN"):
+    with (
+        patch(
+            "eksupgrade.src.preflight._custom_ng_current_image",
+            return_value="amazon/bottlerocket-aws-k8s-1.32-x86_64-v1.32.0",
+        ),
+        patch("eksupgrade.src.preflight.get_latest_ami", return_value="NAN"),
+    ):
         findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
     assert any(f.item == "ng-br" and f.severity == "blocking" for f in findings)
 
@@ -268,7 +298,7 @@ def test_run_preflight_aggregates_and_returns_result() -> None:
     cluster.name = "c"
     cluster.region = "ap-northeast-2"
     cluster.addons = [_addon("coredns", "v1.11.4", "v1.12.4", ["v1.12.4"])]
-    cluster.nodegroups = [_ng("ng-al2", "AL2_x86_64")]
+    cluster.nodegroups = [_ng("ng-al2023", "AL2023_x86_64_STANDARD")]
     with (
         patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("none")),
         patch("eksupgrade.src.preflight.loading_config", side_effect=Exception("no cluster")),
@@ -428,3 +458,120 @@ def test_pdb_warns_on_lookup_failure() -> None:
         findings = _check_pod_disruption_budgets(cluster, region="ap-northeast-2")
     assert any(f.severity == "warning" and "could not" in f.detail.lower() for f in findings)
     assert not any(f.severity == "blocking" for f in findings)
+
+
+class TestAl2NodegroupEol:
+    """AL2 managed node groups cannot be upgraded to 1.33+ (no AL2 AMIs exist);
+    preflight must block with a migration hint instead of failing mid-upgrade."""
+
+    def _cluster_with_ng(self, ami_type: str, target: str):
+        from unittest.mock import MagicMock
+
+        ng = MagicMock()
+        ng.name = "ng-1"
+        ng.ami_type = ami_type
+        cluster = MagicMock()
+        cluster.nodegroups = [ng]
+        cluster.target_version = target
+        return cluster
+
+    def test_al2_nodegroup_targeting_1_33_is_blocking(self):
+        from eksupgrade.src.preflight import _check_managed_nodegroups
+
+        cluster = self._cluster_with_ng("AL2_x86_64", "1.33")
+        findings = _check_managed_nodegroups(cluster, "ap-northeast-2")
+
+        assert any(f.severity == "blocking" and "AL2023" in f.detail for f in findings)
+
+    def test_al2_nodegroup_targeting_1_32_passes(self):
+        from eksupgrade.src.preflight import _check_managed_nodegroups
+
+        cluster = self._cluster_with_ng("AL2_x86_64", "1.32")
+        findings = _check_managed_nodegroups(cluster, "ap-northeast-2")
+
+        assert all(f.severity == "pass" for f in findings)
+
+    def test_al2023_nodegroup_targeting_1_33_passes(self):
+        from eksupgrade.src.preflight import _check_managed_nodegroups
+
+        cluster = self._cluster_with_ng("AL2023_x86_64_STANDARD", "1.33")
+        findings = _check_managed_nodegroups(cluster, "ap-northeast-2")
+
+        assert all(f.severity == "pass" for f in findings)
+
+
+_BR_IMAGE = "amazon/bottlerocket-aws-k8s-1.32-x86_64-v1.32.0-cacc4ce9"
+_AL2_IMAGE = "amazon/amazon-eks-node-1.32-v20250101"
+_CURRENT_IMAGE = "eksupgrade.src.preflight._custom_ng_current_image"
+
+
+class TestCustomNodegroupActualOs:
+    """The CUSTOM preflight check must inspect the launch template's ACTUAL
+    AMI (like the runtime resolver) instead of assuming Bottlerocket — a
+    CUSTOM node group backed by an AL2 image used to pass preflight and then
+    fail mid-upgrade."""
+
+    def _cluster(self, target="1.33"):
+        cluster = MagicMock()
+        cluster.version = "1.32"
+        cluster.target_version = target
+        cluster.nodegroups = [_ng("ng-custom", "CUSTOM")]
+        return cluster
+
+    def test_custom_al2_image_blocks_past_1_32_with_migration_hint(self):
+        with (
+            patch(_CURRENT_IMAGE, return_value=_AL2_IMAGE),
+            patch("eksupgrade.src.preflight.get_latest_ami") as mock_ami,
+        ):
+            findings = _check_managed_nodegroups(self._cluster("1.33"), region="ap-northeast-2")
+
+        assert any(f.severity == "blocking" and "AL2023" in f.detail for f in findings)
+        mock_ami.assert_not_called()
+
+    def test_custom_al2_image_blocks_even_at_1_32(self):
+        """The runtime resolver cannot classify an AL2 ImageLocation either, so
+        this is blocking regardless of target — just with a different reason."""
+        with (
+            patch(_CURRENT_IMAGE, return_value=_AL2_IMAGE),
+            patch("eksupgrade.src.preflight.get_latest_ami") as mock_ami,
+        ):
+            findings = _check_managed_nodegroups(self._cluster("1.32"), region="ap-northeast-2")
+
+        assert any(f.severity == "blocking" for f in findings)
+        mock_ami.assert_not_called()
+
+    def test_custom_bottlerocket_image_resolves_with_real_os_hint(self):
+        """The resolve call must carry the ACTUAL image hint (runtime contract),
+        not a hardcoded 'bottlerocket' guess."""
+        with (
+            patch(_CURRENT_IMAGE, return_value=_BR_IMAGE),
+            patch("eksupgrade.src.preflight.get_latest_ami", return_value="ami-0abc") as mock_ami,
+        ):
+            findings = _check_managed_nodegroups(self._cluster("1.33"), region="ap-northeast-2")
+
+        assert any(f.item == "ng-custom" and f.severity == "pass" and "ami-0abc" in f.detail for f in findings)
+        mock_ami.assert_called_once_with("1.33", _BR_IMAGE, _BR_IMAGE, "ap-northeast-2")
+
+    def test_custom_inspect_failure_is_blocking(self):
+        with patch(_CURRENT_IMAGE, side_effect=RuntimeError("lt gone")):
+            findings = _check_managed_nodegroups(self._cluster("1.33"), region="ap-northeast-2")
+
+        assert any(f.severity == "blocking" and "lt gone" in f.detail for f in findings)
+
+
+def test_custom_ng_current_image_reads_lt_then_image():
+    from eksupgrade.src.preflight import _custom_ng_current_image
+
+    ng = MagicMock()
+    ng.launch_template = {"id": "lt-1", "version": "3"}
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_launch_template_versions.return_value = {
+        "LaunchTemplateVersions": [{"LaunchTemplateData": {"ImageId": "ami-cur"}}]
+    }
+    fake_ec2.describe_images.return_value = {"Images": [{"ImageLocation": _BR_IMAGE}]}
+
+    with patch("eksupgrade.src.preflight.boto3.client", return_value=fake_ec2):
+        assert _custom_ng_current_image(ng, "ap-northeast-2") == _BR_IMAGE
+
+    fake_ec2.describe_launch_template_versions.assert_called_once_with(LaunchTemplateId="lt-1", Versions=["3"])
+    fake_ec2.describe_images.assert_called_once_with(ImageIds=["ami-cur"])

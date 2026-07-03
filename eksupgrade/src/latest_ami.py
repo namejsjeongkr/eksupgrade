@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import boto3
+from packaging.version import Version
 
 from eksupgrade.utils import echo_error, get_logger
 
 logger = get_logger(__name__)
+
+# The last Kubernetes version with EKS-optimized Amazon Linux 2 AMIs.
+AL2_FINAL_VERSION = "1.32"
 
 
 def get_latest_ami(cluster_version: str, instance_type: str, image_to_search: str, region: str) -> str:
@@ -33,6 +37,11 @@ def get_latest_ami(cluster_version: str, instance_type: str, image_to_search: st
                 f"/aws/service/eks/optimized-ami/{cluster_version}/amazon-linux-2023/x86_64/standard/recommended/image_id"
             ]
     elif "Amazon Linux 2" in instance_type:
+        if Version(cluster_version) > Version(AL2_FINAL_VERSION):
+            raise Exception(
+                f"EKS-optimized Amazon Linux 2 AMIs end at Kubernetes {AL2_FINAL_VERSION}; "
+                f"no AL2 AMI exists for {cluster_version}. Migrate the node group to AL2023 first."
+            )
         if "arm64" in image_to_search.lower() or "arm64" in instance_type.lower():
             names = [f"/aws/service/eks/optimized-ami/{cluster_version}/amazon-linux-2-arm64/recommended/image_id"]
         else:

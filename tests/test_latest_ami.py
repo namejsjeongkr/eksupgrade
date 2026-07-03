@@ -336,3 +336,27 @@ class TestUnknownAMI:
     def test_empty_instance_type_returns_nan(self, region) -> None:
         result = get_latest_ami(K8S_VERSION, "", "", region)
         assert result == "NAN"
+
+
+class TestAl2EndOfLife:
+    """AL2 EKS-optimized AMIs end at Kubernetes 1.32 — requesting an AL2 AMI
+    for 1.33+ must fail with a clear migration message instead of an opaque
+    SSM parameter-not-found error mid-upgrade."""
+
+    def test_al2_at_or_past_1_33_raises_with_migration_hint(self, region) -> None:
+        import pytest
+
+        with pytest.raises(Exception, match="AL2023"):
+            get_latest_ami("1.33", "Amazon Linux 2", "amazon-eks-node-1.32", region)
+
+    def test_al2_at_1_32_still_resolves(self, region) -> None:
+        mock_ssm = _make_ssm_mock("ami-al2-132")
+        with patch(_BOTO3_CLIENT, side_effect=lambda svc, region_name=None: mock_ssm):
+            result = get_latest_ami("1.32", "Amazon Linux 2", "amazon-eks-node-1.32", region)
+        assert result == "ami-al2-132"
+
+    def test_al2023_at_1_33_is_unaffected(self, region) -> None:
+        mock_ssm = _make_ssm_mock("ami-al2023-133")
+        with patch(_BOTO3_CLIENT, side_effect=lambda svc, region_name=None: mock_ssm):
+            result = get_latest_ami("1.33", "Amazon Linux 2023", "amazon-eks-node-al2023", region)
+        assert result == "ami-al2023-133"
