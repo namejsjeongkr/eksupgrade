@@ -135,12 +135,13 @@ def _ng(name, ami_type, version="1.32"):
 
 
 def test_managed_ng_pass_non_custom() -> None:
+    # AL2023 (not AL2 — AL2 AMIs end at 1.32 and are now blocking past that).
     cluster = MagicMock()
     cluster.version = "1.32"
     cluster.target_version = "1.33"
-    cluster.nodegroups = [_ng("ng-al2", "AL2_x86_64")]
+    cluster.nodegroups = [_ng("ng-al2023", "AL2023_x86_64_STANDARD")]
     findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
-    assert any(f.item == "ng-al2" and f.severity == "pass" for f in findings)
+    assert any(f.item == "ng-al2023" and f.severity == "pass" for f in findings)
 
 
 def test_managed_ng_custom_pass_when_ami_resolves() -> None:
@@ -268,7 +269,7 @@ def test_run_preflight_aggregates_and_returns_result() -> None:
     cluster.name = "c"
     cluster.region = "ap-northeast-2"
     cluster.addons = [_addon("coredns", "v1.11.4", "v1.12.4", ["v1.12.4"])]
-    cluster.nodegroups = [_ng("ng-al2", "AL2_x86_64")]
+    cluster.nodegroups = [_ng("ng-al2023", "AL2023_x86_64_STANDARD")]
     with (
         patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("none")),
         patch("eksupgrade.src.preflight.loading_config", side_effect=Exception("no cluster")),
@@ -428,3 +429,43 @@ def test_pdb_warns_on_lookup_failure() -> None:
         findings = _check_pod_disruption_budgets(cluster, region="ap-northeast-2")
     assert any(f.severity == "warning" and "could not" in f.detail.lower() for f in findings)
     assert not any(f.severity == "blocking" for f in findings)
+
+
+class TestAl2NodegroupEol:
+    """AL2 managed node groups cannot be upgraded to 1.33+ (no AL2 AMIs exist);
+    preflight must block with a migration hint instead of failing mid-upgrade."""
+
+    def _cluster_with_ng(self, ami_type: str, target: str):
+        from unittest.mock import MagicMock
+
+        ng = MagicMock()
+        ng.name = "ng-1"
+        ng.ami_type = ami_type
+        cluster = MagicMock()
+        cluster.nodegroups = [ng]
+        cluster.target_version = target
+        return cluster
+
+    def test_al2_nodegroup_targeting_1_33_is_blocking(self):
+        from eksupgrade.src.preflight import _check_managed_nodegroups
+
+        cluster = self._cluster_with_ng("AL2_x86_64", "1.33")
+        findings = _check_managed_nodegroups(cluster, "ap-northeast-2")
+
+        assert any(f.severity == "blocking" and "AL2023" in f.detail for f in findings)
+
+    def test_al2_nodegroup_targeting_1_32_passes(self):
+        from eksupgrade.src.preflight import _check_managed_nodegroups
+
+        cluster = self._cluster_with_ng("AL2_x86_64", "1.32")
+        findings = _check_managed_nodegroups(cluster, "ap-northeast-2")
+
+        assert all(f.severity == "pass" for f in findings)
+
+    def test_al2023_nodegroup_targeting_1_33_passes(self):
+        from eksupgrade.src.preflight import _check_managed_nodegroups
+
+        cluster = self._cluster_with_ng("AL2023_x86_64_STANDARD", "1.33")
+        findings = _check_managed_nodegroups(cluster, "ap-northeast-2")
+
+        assert all(f.severity == "pass" for f in findings)

@@ -121,6 +121,21 @@ def _check_managed_nodegroups(cluster, region: str) -> list[PreflightFinding]:
     area = "Managed NodeGroups"
 
     for ng in cluster.nodegroups:
+        # AL2 EKS-optimized AMIs end at Kubernetes 1.32 — an AL2 node group
+        # (amiType AL2_*; AL2023 uses the AL2023_ prefix) cannot be upgraded
+        # past that, so block before the upgrade fails mid-flight.
+        if ng.ami_type.startswith("AL2_") and parse_version(cluster.target_version) > parse_version("1.32"):
+            findings.append(
+                PreflightFinding(
+                    area,
+                    ng.name,
+                    "blocking",
+                    f"amiType {ng.ami_type}: AL2 AMIs end at 1.32 — migrate to AL2023 before targeting "
+                    f"{cluster.target_version}",
+                )
+            )
+            continue
+
         if ng.ami_type != "CUSTOM":
             findings.append(
                 PreflightFinding(area, ng.name, "pass", f"amiType {ng.ami_type}; AWS-managed rolling upgrade")
