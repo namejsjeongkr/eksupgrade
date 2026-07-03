@@ -39,32 +39,44 @@ queue = queue.Queue()
 class StatsWorker(threading.Thread):
     """Define the Stats worker for process and queue handling."""
 
-    def __init__(self, queue, id) -> None:
-        """Initialize the stats worker."""
+    def __init__(self, queue, id, failures: list[str] | None = None) -> None:
+        """Initialize the stats worker.
+
+        failures collects the names of node groups whose update raised, so the
+        caller can report them after queue.join().
+        """
         threading.Thread.__init__(self)
         self.queue = queue
         self.id = id
+        self.failures = failures if failures is not None else []
 
     def run(self) -> None:
-        """Run the thread routine."""
-        while self.queue.not_empty:
+        """Run the thread routine.
+
+        task_done() must run even when an update raises — a dead worker that
+        never marks its item done leaves the caller's queue.join() hanging
+        forever (with the Cluster Autoscaler still paused).
+        """
+        while True:
             cluster_name, ng_name, to_update, region, max_retry, forced, typse = self.queue.get()
-            if typse == "managed":
+            try:
                 echo_info(f"Updating node group: {ng_name} to version: {to_update}")
-                update_nodegroup(cluster_name, ng_name, to_update, region)
+                if typse == "managed":
+                    update_nodegroup(cluster_name, ng_name, to_update, region)
+                elif typse == "selfmanaged":
+                    actual_update(
+                        cluster_name=cluster_name,
+                        asg_iter=ng_name,
+                        to_update=to_update,
+                        region=region,
+                        max_retry=max_retry,
+                        forced=forced,
+                    )
                 echo_success(f"Updated node group: {ng_name} to version: {to_update}")
-                self.queue.task_done()
-            elif typse == "selfmanaged":
-                echo_info(f"Updating node group: {ng_name} to version: {to_update}")
-                actual_update(
-                    cluster_name=cluster_name,
-                    asg_iter=ng_name,
-                    to_update=to_update,
-                    region=region,
-                    max_retry=max_retry,
-                    forced=forced,
-                )
-                echo_success(f"Updated node group: {ng_name} to version: {to_update}")
+            except Exception as error:  # noqa: BLE001
+                echo_error(f"Failed updating node group: {ng_name} - Error: {error}")
+                self.failures.append(ng_name)
+            finally:
                 self.queue.task_done()
 
 

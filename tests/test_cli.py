@@ -87,6 +87,86 @@ def test_preflight_crash_exits_nonzero() -> None:
     assert result.exit_code == 2
 
 
+def _fake_upgradeable_cluster() -> MagicMock:
+    """Return a cluster mock that walks the full upgrade path with no nodegroups."""
+    fake_cluster = MagicMock()
+    fake_cluster.version = "1.34"
+    fake_cluster.target_version = "1.35"
+    fake_cluster.available = True
+    fake_cluster.active = True
+    fake_cluster.status = "ACTIVE"
+    fake_cluster.upgradable_managed_nodegroups = []
+    fake_cluster.nodegroups = []
+    fake_cluster.nodegroup_names = []
+    fake_cluster.asg_names = []
+    return fake_cluster
+
+
+def test_cluster_autoscaler_resumed_on_keyboard_interrupt():
+    """Ctrl+C mid-upgrade must NOT leave the Cluster Autoscaler paused at 0 replicas.
+
+    KeyboardInterrupt is a BaseException, so an `except Exception` recovery
+    block never sees it — the resume must live in a finally.
+    """
+    fake_cluster = _fake_upgradeable_cluster()
+    fake_cluster.upgrade_nodegroups.side_effect = KeyboardInterrupt
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch(
+            "eksupgrade.cli.is_cluster_auto_scaler_present",
+            return_value=(True, 2, "cluster-autoscaler", "kube-system"),
+        ),
+        patch("eksupgrade.cli.is_karpenter_present", return_value=(False, 0, "")),
+        patch("eksupgrade.cli.cluster_auto_enable_disable") as mock_toggle,
+    ):
+        runner.invoke(app, ["c", "1.35", "ap-northeast-2", "--no-interactive"])
+
+    operations = [call.kwargs.get("operation") for call in mock_toggle.call_args_list]
+    assert "pause" in operations
+    assert "start" in operations, "Cluster Autoscaler was left paused after KeyboardInterrupt"
+
+
+def test_cluster_autoscaler_resumed_on_error():
+    """A plain exception mid-upgrade must also resume the Cluster Autoscaler (regression guard)."""
+    fake_cluster = _fake_upgradeable_cluster()
+    fake_cluster.upgrade_nodegroups.side_effect = RuntimeError("boom")
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch(
+            "eksupgrade.cli.is_cluster_auto_scaler_present",
+            return_value=(True, 2, "cluster-autoscaler", "kube-system"),
+        ),
+        patch("eksupgrade.cli.is_karpenter_present", return_value=(False, 0, "")),
+        patch("eksupgrade.cli.cluster_auto_enable_disable") as mock_toggle,
+    ):
+        runner.invoke(app, ["c", "1.35", "ap-northeast-2", "--no-interactive"])
+
+    operations = [call.kwargs.get("operation") for call in mock_toggle.call_args_list]
+    assert "start" in operations
+
+
+def test_parallel_worker_failure_fails_the_upgrade():
+    """A failed parallel node group update must NOT let the CLI report overall success."""
+    fake_cluster = _fake_upgradeable_cluster()
+    fake_cluster.asg_names = ["asg-1"]
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch(
+            "eksupgrade.cli.is_cluster_auto_scaler_present",
+            return_value=(True, 2, "cluster-autoscaler", "kube-system"),
+        ),
+        patch("eksupgrade.cli.is_karpenter_present", return_value=(False, 0, "")),
+        patch("eksupgrade.cli.cluster_auto_enable_disable") as mock_toggle,
+        patch("eksupgrade.starter.actual_update", side_effect=RuntimeError("boom")),
+    ):
+        result = runner.invoke(app, ["c", "1.35", "ap-northeast-2", "--no-interactive", "--parallel"])
+
+    assert "UPDATED TO" not in result.output, "CLI reported success despite a failed node group"
+    # And the Cluster Autoscaler must still be resumed on the failure path.
+    operations = [call.kwargs.get("operation") for call in mock_toggle.call_args_list]
+    assert "start" in operations
+
+
 def test_timing_summary_printed_on_success():
     fake_cluster = MagicMock()
     fake_cluster.version = "1.34"

@@ -152,6 +152,8 @@ def watcher(cluster_name: str, name: str, region: str) -> bool:
 
 
 MAX_EVICTION_RETRIES = 3
+PDB_EVICTION_TIMEOUT = 900
+PDB_RETRY_INTERVAL = 5
 
 
 def _is_daemonset_pod(pod) -> bool:
@@ -169,15 +171,46 @@ def _is_standalone_pod(pod) -> bool:
     return not (pod.metadata.owner_references or [])
 
 
-def _evict_pod(cluster_name: str, node_name: str, pod, core_v1_api, region: str) -> None:
-    """Evict a single pod via the eviction API, retrying until the pod is gone."""
+def _evict_pod(
+    cluster_name: str, node_name: str, pod, core_v1_api, region: str, pdb_timeout: int = PDB_EVICTION_TIMEOUT
+) -> None:
+    """Evict a single pod via the eviction API, retrying until the pod is gone.
+
+    kubectl-faithful semantics: a 429 means a PodDisruptionBudget is temporarily
+    blocking the eviction, so wait and retry (bounded by pdb_timeout) instead of
+    failing the whole drain; a 404 means the pod is already gone, which IS success
+    (also covers the retry after the watcher missed a fast DELETED event).
+    """
     eviction_body = V1Eviction(metadata=client.V1ObjectMeta(name=pod.metadata.name, namespace=pod.metadata.namespace))
-    for attempt in range(MAX_EVICTION_RETRIES):
-        core_v1_api.create_namespaced_pod_eviction(
-            name=pod.metadata.name, namespace=pod.metadata.namespace, body=eviction_body
-        )
+    deadline = time.monotonic() + pdb_timeout
+    watch_misses = 0
+    while watch_misses < MAX_EVICTION_RETRIES:
+        try:
+            core_v1_api.create_namespaced_pod_eviction(
+                name=pod.metadata.name, namespace=pod.metadata.namespace, body=eviction_body
+            )
+        except ApiException as api_error:
+            if api_error.status == 404:
+                return
+            if api_error.status == 429:
+                if time.monotonic() >= deadline:
+                    echo_error(
+                        f"PodDisruptionBudget kept blocking eviction of pod: {pod.metadata.name} "
+                        f"for {pdb_timeout}s - node: {node_name} - cluster: {cluster_name}",
+                    )
+                    raise Exception(
+                        f"Eviction of pod {pod.metadata.name} blocked by a PodDisruptionBudget past {pdb_timeout}s"
+                    ) from api_error
+                echo_info(
+                    f"Eviction of pod: {pod.metadata.name} is blocked by a PodDisruptionBudget; "
+                    f"retrying in {PDB_RETRY_INTERVAL}s..."
+                )
+                time.sleep(PDB_RETRY_INTERVAL)
+                continue
+            raise
         if watcher(cluster_name, pod.metadata.name, region):
             return
+        watch_misses += 1
     echo_error(
         f"Unable to evict pod: {pod.metadata.name} from node: {node_name} in cluster: {cluster_name}",
     )

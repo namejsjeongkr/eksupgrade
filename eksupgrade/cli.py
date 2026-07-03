@@ -62,11 +62,13 @@ def main(
 
     # Initialize autoscaler state variables before try block
     is_ca_present: bool = False
+    ca_paused: bool = False
     ca_replicas_value: int = 0
     ca_name: str = "cluster-autoscaler"
     ca_namespace: str = "kube-system"
     is_karpenter: bool = False
     karpenter_namespace: str = ""
+    worker_failures: list[str] = []
     timer = PhaseTimer()
 
     try:
@@ -149,6 +151,7 @@ def main(
                 name=ca_name,
                 namespace=ca_namespace,
             )
+            ca_paused = True
             echo_info(f"Paused the Cluster AutoScaler ({ca_name} in {ca_namespace})")
         else:
             echo_info("No Cluster AutoScaler is Found")
@@ -165,8 +168,8 @@ def main(
 
         if parallel:
             for x in range(20):
-                worker = StatsWorker(queue, x)
-                worker.setDaemon(True)
+                worker = StatsWorker(queue, x, failures=worker_failures)
+                worker.daemon = True
                 worker.start()
 
         if target_cluster.upgradable_managed_nodegroups:
@@ -191,6 +194,8 @@ def main(
 
         if parallel:
             queue.join()
+            if worker_failures:
+                raise Exception(f"Parallel node group upgrade failed for: {worker_failures}")
 
         # Upgrade Karpenter-managed nodes via native Drift. The control plane is
         # already upgraded, so alias-based EC2NodeClasses re-resolve to the new
@@ -213,18 +218,6 @@ def main(
                     "Pinned NodeClasses need manual amiSelectorTerms updates."
                 )
 
-        # Re-enable Cluster Autoscaler after upgrade
-        if is_ca_present:
-            cluster_auto_enable_disable(
-                cluster_name=cluster_name,
-                operation="start",
-                mx_val=ca_replicas_value,
-                region=region,
-                name=ca_name,
-                namespace=ca_namespace,
-            )
-            echo_info("Cluster Autoscaler is Enabled Again")
-
         echo_info(f"EKS Cluster {cluster_name} UPDATED TO {cluster_version}")
     except typer.Abort:
         echo_warning("Cluster upgrade aborted!")
@@ -233,8 +226,14 @@ def main(
         # below would otherwise swallow our clean preflight exit. Let it propagate.
         raise
     except Exception as error:
-        # Try to re-enable autoscalers even on error
-        if is_ca_present:
+        # Karpenter is never paused (drift needs the controller running), so there
+        # is nothing to re-enable here on error.
+        echo_error(f"Exception encountered! Error: {error}")
+    finally:
+        # Resume the Cluster Autoscaler here — and ONLY here — so it also runs on
+        # KeyboardInterrupt/SystemExit, which `except Exception` never sees. A
+        # Ctrl+C mid-roll must not leave the autoscaler at 0 replicas.
+        if ca_paused:
             try:
                 cluster_auto_enable_disable(
                     cluster_name=cluster_name,
@@ -245,15 +244,11 @@ def main(
                     namespace=ca_namespace,
                 )
                 echo_info("Cluster Autoscaler is Enabled Again")
-            except Exception as error2:
+            except Exception as resume_error:
                 echo_error(
-                    f"Cluster Autoscaler re-enable failed and must be done manually! Error: {error2}",
+                    f"Cluster Autoscaler re-enable failed and must be done manually! Error: {resume_error}",
                 )
 
-        # Karpenter is never paused (drift needs the controller running), so there
-        # is nothing to re-enable here on error.
-        echo_error(f"Exception encountered! Error: {error}")
-    finally:
         # Emit the per-phase timing summary last, after any autoscaler-resume
         # messages. Skipped when no phase ran (e.g. the preflight Exit path).
         if timer.records:
