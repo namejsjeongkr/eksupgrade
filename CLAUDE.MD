@@ -6,7 +6,7 @@ This document provides comprehensive context for AI assistants working with the 
 
 **eksupgrade** is a production-ready Python CLI tool that automates Amazon EKS (Elastic Kubernetes Service) cluster upgrades. It orchestrates the complex process of upgrading control planes, managed node groups, self-managed node groups, and cluster add-ons with intelligent error handling and recovery.
 
-- **Version**: 0.9.0
+- **Version**: 0.10.0
 - **License**: MIT-0
 - **Python**: 3.10+
 - **Package**: Available on PyPI as `eksupgrade`
@@ -24,7 +24,7 @@ The tool addresses the challenging task of coordinating multiple upgrade operati
 
 ```
 eksupgrade/
-├── __init__.py                 # Package version (0.9.0)
+├── __init__.py                 # Package version (0.10.0)
 ├── __main__.py                 # CLI entry point
 ├── cli.py                      # Main CLI command handler (Typer-based)
 ├── exceptions.py               # Custom exception classes
@@ -36,16 +36,16 @@ eksupgrade/
 └── src/                        # Core functionality
     ├── boto_aws.py             # AWS boto3 operations (EC2, ASG, EKS)
     ├── k8s_client.py           # Kubernetes client operations (drain, evict, autoscaler)
+    ├── karpenter.py            # Karpenter drift-based node upgrade logic
+    ├── preflight.py            # Read-only pre-upgrade checks (--preflight)
+    ├── rollback.py             # Rollback readiness insights + addon compat
     ├── eks_get_image_type.py   # AMI/image type detection
     ├── latest_ami.py           # Latest AMI retrieval from AWS SSM/EC2
-    ├── self_managed.py         # Self-managed node group upgrade logic
-    └── S3Files/                # Embedded resource files (version mappings)
-        ├── version_dict.json
-        ├── vpc-cni.json
-        ├── kube-proxy.json
-        ├── kube-proxy-configmap.json
-        └── coredns.json
+    └── self_managed.py         # Self-managed node group upgrade logic
 ```
+
+Addon versions are resolved live via `describe_addon_versions` — there are no
+embedded version-mapping files (the old `src/S3Files/` directory was removed).
 
 ## Key Technologies
 
@@ -141,7 +141,7 @@ def main(
 #### 3. starter.py - Upgrade Orchestration
 
 **Self-Managed Node Group Upgrade Process**:
-1. Pause Cluster Autoscaler and Karpenter
+1. Pause Cluster Autoscaler (Karpenter is NOT paused — its nodes upgrade via drift, see src/karpenter.py)
 2. For each Auto Scaling Group:
    - Detect current AMI type (AL2, Windows, Bottlerocket, Ubuntu)
    - Fetch latest AMI for target Kubernetes version
@@ -150,20 +150,20 @@ def main(
    - Drain and cordon old nodes (handle PDBs)
    - Terminate old instances
    - Monitor new node readiness
-3. Resume autoscalers (even on failure)
+3. Resume the Cluster Autoscaler (in cli.py's finally — runs even on failure/Ctrl+C)
 
 **Threading Support**: Optional parallel upgrades using threading.Thread
 
 #### 4. src/k8s_client.py - Kubernetes Operations
 
 **Key Functions**:
-- `bearer_token(cluster_name, region)` - Generate EKS auth token via AWS STS
-- `k8s_client_dict(cluster)` - Create kubernetes client configuration
-- `drain_node(k8s_client, node_name, force)` - Drain with eviction API
-- `is_pod_daemonset(pod)` - Check if pod is part of DaemonSet
-- `pause_cluster_autoscaler()` - Set replicas to 0
-- `resume_cluster_autoscaler()` - Restore original replicas
-- `pause_karpenter()` / `resume_karpenter()` - Manage Karpenter controller
+- `get_bearer_token(cluster_id, region)` - Generate EKS auth token via AWS STS
+- `loading_config(cluster_name, region)` - Configure the default kubernetes client (CA + bearer token)
+- `drain_nodes(cluster_name, node_name, forced, region)` - Drain all pods via the eviction API (PDB 429s retried; DaemonSet/mirror pods skipped)
+- `unschedule_old_nodes()` / `delete_node()` / `find_node()` - Node cordon/delete/lookup
+- `is_cluster_auto_scaler_present()` / `cluster_auto_enable_disable()` - Detect and pause/resume the Cluster Autoscaler
+- `is_karpenter_present()` - Detect Karpenter (the controller is never paused; drift handles its nodes)
+- `get_statefulset_pods_on_node()` / `wait_for_statefulset_pods_ready()` - StatefulSet PVC-rebind confirmation
 
 **Authentication**: Uses AWS STS GetCallerIdentity to generate bearer token for EKS
 
@@ -211,7 +211,7 @@ def main(
    - **vpc-cni**: Step-wise upgrade by minor version (e.g., 1.10 -> 1.11 -> 1.12)
    - **kube-proxy**: Direct upgrade to compatible version
    - **coredns**: Direct upgrade to compatible version
-   - Version mappings from embedded JSON files in S3Files/
+   - Versions resolved live via `describe_addon_versions` (no embedded mappings)
 
 4. **Managed Node Group Upgrades**
    - AWS handles AMI updates and rolling upgrades
@@ -249,11 +249,11 @@ def main(
 
 ### Custom Exceptions (exceptions.py)
 
-- `ResourceNotReady` - Resource not in expected state
-- `ResourceFailure` - Operation failed
-- `UpgradeException` - General upgrade error
-- `AddonUpgradeException` - Add-on specific error
-- `PDBException` - Pod Disruption Budget violation
+- `BaseEksUpgradeException` - Base exception for the package
+- `EksException` - General EKS-level error
+- `ClusterException` / `ClusterInactiveException` - Cluster state errors
+- `EksUpgradeNotImplementedError` - Unimplemented operation
+- `InvalidUpgradeTargetVersion` - Multi-minor jump or invalid rollback target
 
 ### Recovery Mechanisms
 
@@ -285,21 +285,12 @@ def main(
 
 ### CI/CD Validation (.github/workflows/)
 
-**validate.yaml**:
-- Linting: black, isort, ruff, pydocstyle
-- Type checking: mypy
-- Unit tests: pytest on Python 3.8-3.11
-- Security: bandit, safety
-- Coverage: codecov integration
+**validate.yaml** (the only workflow):
+- Checks: `poetry poe check` (formatting/lint)
+- Unit tests: pytest on Python 3.10
+- Security: `poetry poe safety`
 
-**e2e-test.yaml**:
-- End-to-end cluster upgrade tests
-- Real AWS infrastructure
-- Automated cluster creation and cleanup
-
-**publish.yaml**:
-- Automated PyPI package publishing
-- Triggered on release tags
+There is no e2e or publish workflow in this repository.
 
 ## Development Guidelines
 
@@ -428,12 +419,12 @@ if target_version > current_version:
 ### Error Handling
 
 ```python
-from eksupgrade.exceptions import ResourceNotReady
+from eksupgrade.exceptions import InvalidUpgradeTargetVersion
 
 try:
-    cluster.wait_for_active(timeout=600)
-except ResourceNotReady:
-    logger.error("Cluster did not become active in time")
+    cluster.update_cluster(wait=True)
+except InvalidUpgradeTargetVersion:
+    logger.error("Multi-minor jump requested; run once per minor")
     raise
 ```
 
@@ -589,13 +580,9 @@ poetry build
 
 # Publish to PyPI (manual)
 poetry publish
-
-# Automated via GitHub Actions
-# Create release tag: v0.9.0
-git tag v0.9.0
-git push origin v0.9.0
-# Triggers .github/workflows/publish.yaml
 ```
+
+There is no automated publish workflow in this repository.
 
 ## Related Documentation
 
@@ -625,7 +612,7 @@ git push origin v0.9.0
 
 ### When Modifying Version Logic
 - **utils.py**: Version parsing utilities
-- **src/S3Files/**: Version mapping JSON files
+- **models/eks.py**: `_default_next_minor` / `_previous_minor` and addon version resolution
 
 ### When Adding Tests
 - **tests/conftest.py**: Shared fixtures
@@ -666,10 +653,9 @@ git push origin v0.9.0
   there is no static version table to maintain (the old S3Files/version_dict.json
   was removed).
 
-### Add-on Version Mappings
-- Located in `src/S3Files/*.json`
-- Must be manually updated when AWS releases new add-on versions
-- Sources: AWS EKS documentation
+### Add-on Version Resolution
+- Resolved live per target version via `describe_addon_versions` (no static files)
+- vpc-cni still steps one minor at a time (graduated upgrade)
 
 ## Future Enhancement Considerations
 
