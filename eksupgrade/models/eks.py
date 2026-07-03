@@ -599,11 +599,15 @@ class ClusterAddon(EksResource):
     @cached_property
     def default_version(self) -> str:
         """Get the EKS default version of the addon."""
-        return next(
-            item.get("addonVersion", "")
-            for item in self.available_versions_data.get("addonVersions", [])
-            if item.get("compatibilities", [])[0].get("defaultVersion", False) is True
-        )
+        for item in self.available_versions_data.get("addonVersions", []):
+            compatibilities = item.get("compatibilities", [])
+            if compatibilities and compatibilities[0].get("defaultVersion", False) is True:
+                return item.get("addonVersion", "")
+        # Some marketplace/third-party addons flag no default version (or return
+        # empty compatibilities). Fall back to the CURRENT version so the addon
+        # is skipped rather than crashing the run or force-upgrading it.
+        echo_warning(f"Addon: {self.name} has no default version flagged; leaving it at {self.version}")
+        return self.version
 
     @property
     def minors_to_target(self) -> list[int]:

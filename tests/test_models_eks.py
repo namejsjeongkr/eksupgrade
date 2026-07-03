@@ -426,3 +426,31 @@ def test_asg_get_prints_instance_table_with_names_and_colors():
     health_cells = table.columns[2]._cells  # Health is the 3rd column
     assert "[green]Healthy[/green]" in health_cells
     assert "[red]Unhealthy[/red]" in health_cells
+
+
+def test_default_version_falls_back_when_no_default_flag(eks_client, eks_cluster, cluster_name, region) -> None:
+    """Marketplace/third-party addons may flag no defaultVersion (and may return
+    empty compatibilities). This must not crash (StopIteration/IndexError) and
+    must not force an unwanted upgrade: fall back to the CURRENT version so the
+    addon is simply skipped."""
+    cluster_resource = Cluster.get(cluster_name, region)
+    cluster_resource.latest_addons = False
+    addon_resource = ClusterAddon(
+        arn="abc",
+        name="third-party-agent",
+        cluster=cluster_resource,
+        region=region,
+        owner="marketplace",
+        publisher="acme",
+        version="v1.2.3-eksbuild.1",
+    )
+    addon_resource.__dict__["available_versions_data"] = {
+        "addonName": "third-party-agent",
+        "addonVersions": [
+            {"addonVersion": "v1.3.0-eksbuild.1", "compatibilities": [{"defaultVersion": False}]},
+            {"addonVersion": "v1.2.3-eksbuild.1", "compatibilities": []},
+        ],
+    }
+
+    assert addon_resource.default_version == "v1.2.3-eksbuild.1"
+    assert addon_resource.needs_upgrade is False
