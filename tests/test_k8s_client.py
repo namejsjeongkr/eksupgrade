@@ -3,6 +3,8 @@
 import base64
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kubernetes import client as k8s_client
 
 from eksupgrade.src.k8s_client import get_bearer_token, loading_config
@@ -76,3 +78,33 @@ def test_find_node_tolerates_missing_provider_id(mock_loading, mock_k8s):
 
     assert find_node("my-cluster", "i-123", "find", "us-east-1") == "n-ready"
     assert find_node("my-cluster", "i-999", "find", "us-east-1") == "NAN"
+
+
+def test_ca_cert_temp_files_are_cleaned_up(tmp_path):
+    """The temp CA PEM files must be removable via the registered cleanup
+    (atexit) instead of accumulating in /tmp until reboot."""
+    import os
+
+    from eksupgrade.src.k8s_client import _CA_CERT_FILES, _ca_cert_path, _cleanup_ca_cert_files
+
+    path = _ca_cert_path("https://cleanup-test.eks", "Y2EtZGF0YQ==")
+    assert os.path.exists(path)
+
+    _cleanup_ca_cert_files()
+
+    assert not os.path.exists(path)
+    assert _CA_CERT_FILES == {}
+
+
+def test_bearer_token_fails_clearly_without_credentials():
+    """No resolvable AWS credentials must raise a clear error, not an opaque
+    AttributeError from inside the request signer."""
+    from unittest.mock import MagicMock
+
+    from eksupgrade.src.k8s_client import get_bearer_token
+
+    fake_session = MagicMock()
+    fake_session.get_credentials.return_value = None
+    with patch("eksupgrade.src.k8s_client.boto3.session.Session", return_value=fake_session):
+        with pytest.raises(Exception, match="credentials"):
+            get_bearer_token("my-cluster", "us-east-1")
