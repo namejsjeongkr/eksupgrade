@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import datetime
 import re
 import time
@@ -12,8 +11,6 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import boto3
-from kubernetes import client as k8s_client
-from kubernetes import config as k8s_config
 from packaging.version import Version
 from rich.console import Console
 from rich.table import Table
@@ -117,10 +114,6 @@ def _previous_minor(version: str) -> str:
     return f"{parsed.major}.{parsed.minor - 1}"
 
 
-TOKEN_PREFIX: str = "k8s-aws-v1"
-TOKEN_HEADER_KEY: str = "x-k8s-aws-id"
-
-
 def requires_cluster(function):
     """Decorate methods to require a cluster attribute."""
 
@@ -147,16 +140,6 @@ class EksResource(AwsRegionResource, ABC):
     def eks_client(self) -> EKSClient:
         """Get a boto EKS client."""
         return self._get_boto_client(service="eks", region_name=self.region)
-
-    @cached_property
-    def core_api_client(self) -> Any:
-        """Get a Kubernetes Core client."""
-        return k8s_client.CoreV1Api()
-
-    @cached_property
-    def apps_api_client(self) -> Any:
-        """Get a Kubernetes Apps client."""
-        return k8s_client.AppsV1Api()
 
 
 @dataclass
@@ -761,51 +744,8 @@ class Cluster(EksResource):
 
     def __post_init__(self) -> None:
         """Perform the post initialization steps."""
-        self._register_k8s_aws_id_handlers()
-        self.load_config()
         self.target_version = self.target_version or _default_next_minor(self.version)
         self.active_waiter = self.eks_client.get_waiter("cluster_active")
-
-    def _register_k8s_aws_id_handlers(self) -> None:
-        """Register the kubernetes AWS ID header handlers."""
-        self.sts_client.meta.events.register(
-            "provide-client-params.sts.GetCallerIdentity",
-            self._retrieve_k8s_aws_id,
-        )
-        self.sts_client.meta.events.register(
-            "before-sign.sts.GetCallerIdentity",
-            self._inject_k8s_aws_id_header,
-        )
-
-    def _retrieve_k8s_aws_id(self, params, context, **_) -> None:
-        """Retrieve the kubernetes AWS ID header for use in boto3 request headers."""
-        if TOKEN_HEADER_KEY in params:
-            context[TOKEN_HEADER_KEY] = params.pop(TOKEN_HEADER_KEY)
-            logger.debug("Retrieving cluster header %s: %s", TOKEN_HEADER_KEY, context[TOKEN_HEADER_KEY])
-
-    def _inject_k8s_aws_id_header(self, request, **_) -> None:
-        """Inject the kubernetes AWS ID header into boto3 request headers."""
-        if TOKEN_HEADER_KEY in request.context:
-            request.headers[TOKEN_HEADER_KEY] = request.context[TOKEN_HEADER_KEY]
-            logger.debug("Patching boto3 STS calls with cluster headers: %s", request.headers)
-
-    def _get_presigned_url(self, url_timeout: int = 60) -> str:
-        """Get the pre-signed URL.
-
-        Arguments:
-            url_timeout: The number of seconds to lease the pre-signed URL for.
-                Defaults to: 60.
-
-        Returns:
-            The pre-signed URL.
-        """
-        logger.debug("Generating the pre-signed url for get-caller-identity...")
-        return self.sts_client.generate_presigned_url(
-            "get_caller_identity",
-            Params={TOKEN_HEADER_KEY: self.cluster_identifier},
-            ExpiresIn=url_timeout,
-            HttpMethod="GET",
-        )
 
     @cached_property
     def current_addons(self) -> list[str]:
@@ -817,16 +757,6 @@ class Cluster(EksResource):
     def cluster_name(self) -> str:
         """Return the cluster name."""
         return self.name
-
-    @property
-    def cluster_identifier(self) -> str:
-        """Return the preferred identifier for the cluster.
-
-        If the cluster is a local cluster deployed on AWS Outposts, the resource ID must be used.
-        If not, use the cluster name.
-
-        """
-        return self.resource_id or self.name
 
     @cached_property
     def addons(self) -> list[ClusterAddon]:
@@ -1006,76 +936,6 @@ class Cluster(EksResource):
         _update_id = update_response.get("id", "")
         _update_status = update_response.get("status", "")
         echo_info(f"Updating nodegroup: {nodegroup.name} - ID: {_update_id} - Status: {_update_status}")
-
-    def get_token(self) -> str:
-        """Generate a presigned url token to pass to client.
-
-        Returns:
-            The pre-signed STS token for use in the Kubernetes configuration.
-
-        """
-        logger.debug("Getting the pre-signed STS token...")
-        url = self._get_presigned_url()
-        suffix: str = base64.urlsafe_b64encode(url.encode("utf-8")).decode("utf-8").rstrip("=")
-        token = f"{TOKEN_PREFIX}.{suffix}"
-        return token
-
-    @property
-    def user_config(self) -> dict[str, str | list[dict[str, Any]]]:
-        """Get a configuration for the Kubernetes client library.
-
-        The credentials of the given portal user are used, access is restricted to the default namespace.
-
-        Returns:
-            The dictionary representation of Kubernetes configuration for the current cluster.
-
-        """
-        config_data: dict[str, str | list[dict[str, Any]]] = {
-            "current-context": self.cluster_name,
-            "contexts": [
-                {
-                    "name": self.cluster_name,
-                    "context": {
-                        "cluster": self.cluster_name,
-                        "user": self.arn,
-                    },
-                }
-            ],
-            "clusters": [
-                {
-                    "name": self.cluster_name,
-                    "cluster": {
-                        "certificate-authority-data": self.certificate_authority_data,
-                        "server": self.endpoint,
-                    },
-                }
-            ],
-            "users": [
-                {
-                    "name": self.arn,
-                    "user": {
-                        "token": self.get_token(),
-                    },
-                }
-            ],
-        }
-        return config_data
-
-    def load_config(self, user_config: dict[str, Any] | None = None) -> None:
-        """Load the Kubernetes configuration.
-
-        Arguments:
-            user_config: The Kubernetes configuration to be used with the client.
-                Defaults to: The current cluster's pre-populated configuration from `Cluster.user_config`.
-
-        Returns:
-            None.
-
-        """
-        logger.debug("Loading Kubernetes config from user config dictionary...")
-        user_config = user_config or self.user_config
-        k8s_config.load_kube_config_from_dict(user_config)
-        logger.debug("Loaded kubernetes config from user config!")
 
     @property
     def available(self) -> bool:
