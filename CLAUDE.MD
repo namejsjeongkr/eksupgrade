@@ -8,7 +8,7 @@ This document provides comprehensive context for AI assistants working with the 
 
 - **Version**: 0.10.0
 - **License**: MIT-0
-- **Python**: 3.10+
+- **Python**: 3.12+ (CI: 3.12, 3.13, 3.14)
 - **Package**: Available on PyPI as `eksupgrade`
 
 ## Core Purpose
@@ -55,7 +55,7 @@ embedded version-mapping files (the old `src/S3Files/` directory was removed).
 - **Version Management**: packaging library for semantic versioning
 - **Testing**: pytest with moto for AWS mocking
 - **Code Quality**: black, isort, ruff, mypy, pydocstyle, bandit, safety
-- **Package Management**: Poetry
+- **Package Management**: uv (PEP 621 `[project]` + `[dependency-groups]`, hatchling build, `uv.lock`)
 
 ## Architecture and Design Patterns
 
@@ -286,9 +286,10 @@ def main(
 ### CI/CD Validation (.github/workflows/)
 
 **validate.yaml** (the only workflow):
-- Checks: `poetry poe check` (formatting/lint)
-- Unit tests: pytest on Python 3.10
-- Security: `poetry poe safety`
+- Checks: `uv run --locked poe check` (formatting/lint)
+- Unit tests: `uv run --locked poe test` on Python 3.12, 3.13, 3.14
+- Security: `uv run --locked poe safety`
+- Setup: `astral-sh/setup-uv` + `uv sync --locked` (`.github/actions/dep-setup`)
 
 There is no e2e or publish workflow in this repository.
 
@@ -306,45 +307,45 @@ There is no e2e or publish workflow in this repository.
 
 ```bash
 # Install dependencies
-poetry install
+uv sync
 
 # Run all tests
-poetry run pytest
+uv run pytest
 
 # Run with coverage
-poetry run pytest --cov=eksupgrade --cov-report=html
+uv run pytest --cov=eksupgrade --cov-report=html
 
 # Run specific test file
-poetry run pytest tests/test_cli.py
+uv run pytest tests/test_cli.py
 ```
 
 ### Code Quality Checks
 
 ```bash
 # Format code
-poetry run black eksupgrade/
-poetry run isort eksupgrade/
+uv run black eksupgrade/
+uv run isort eksupgrade/
 
 # Lint
-poetry run ruff eksupgrade/
-poetry run pydocstyle eksupgrade/
+uv run ruff eksupgrade/
+uv run pydocstyle eksupgrade/
 
 # Type check
-poetry run mypy eksupgrade/
+uv run mypy eksupgrade/
 
 # Security scan
-poetry run bandit -r eksupgrade/
-poetry run safety check
+uv run bandit -r eksupgrade/
+uv run safety check
 ```
 
-### Using Poetry Tasks (pyproject.toml)
+### Using poe Tasks (pyproject.toml)
 
 ```bash
-poetry run poe test      # Run tests
-poetry run poe lint      # Run all linters
-poetry run poe fix       # Auto-fix formatting
-poetry run poe security  # Run security checks
-poetry run poe build     # Build package
+uv run poe test      # Run tests
+uv run poe lint      # Run all linters
+uv run poe fix       # Auto-fix formatting
+uv run poe security  # Run security checks
+uv run poe build     # Build package
 ```
 
 ### Pre-commit Hooks
@@ -352,7 +353,7 @@ poetry run poe build     # Build package
 The project uses pre-commit hooks configured in `.pre-commit-config.yaml`. Install with:
 
 ```bash
-poetry run pre-commit install
+uvx pre-commit install
 ```
 
 ## AWS Permissions Required
@@ -569,17 +570,17 @@ pip install eksupgrade
 # From source
 git clone https://github.com/aws-samples/eks-cluster-upgrade.git
 cd eks-cluster-upgrade
-poetry install
+uv sync
 ```
 
 ### Building and Publishing
 
 ```bash
 # Build package
-poetry build
+uv build
 
 # Publish to PyPI (manual)
-poetry publish
+uv publish
 ```
 
 There is no automated publish workflow in this repository.

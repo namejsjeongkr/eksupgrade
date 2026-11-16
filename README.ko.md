@@ -142,14 +142,14 @@ eksupgrade --help
    (자주 코드를 수정한다면 `pipx install --editable ./eksupgrade`로 설치하면
    `git pull`만으로 재설치 없이 최신 코드가 반영됩니다.)
 
-   **대안 — 개발용**으로는 clone한 저장소 안에서 Poetry를 사용합니다. 이 경우 명령은
-   `poetry run eksupgrade ...` 형태로 실행합니다:
+   **대안 — 개발용**으로는 clone한 저장소 안에서 [uv](https://docs.astral.sh/uv/)를
+   사용합니다(Python 3.12 이상). 이 경우 명령은 `uv run eksupgrade ...` 형태로 실행합니다:
 
 ```sh
 git clone https://github.com/namejsjeongkr/eksupgrade.git
 cd eksupgrade
-poetry install
-poetry run eksupgrade --help
+uv sync
+uv run eksupgrade --help
 ```
 
 2. AWS 권한 — 최소 정책 예시:
@@ -208,8 +208,8 @@ aws eks update-kubeconfig --name <CLUSTER-NAME> --region <REGION>
 
 ## 사용법
 
-> 아래 예시는 `eksupgrade` 명령(pipx 설치)을 사용합니다. 개발용 Poetry로 설치했다면
-> 각 명령 앞에 `poetry run`을 붙이세요.
+> 아래 예시는 `eksupgrade` 명령(pipx 설치)을 사용합니다. 개발용 uv로 설치했다면
+> 각 명령 앞에 `uv run`을 붙이세요.
 
 ```sh
 eksupgrade --help

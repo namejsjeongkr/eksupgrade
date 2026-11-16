@@ -115,14 +115,14 @@ eksupgrade --help
 
    To upgrade later after pulling new changes: `pipx install --force ./eksupgrade`.
 
-   **Alternative — for development**, use Poetry inside the cloned repo. Commands
-   then run as `poetry run eksupgrade ...`:
+   **Alternative — for development**, use [uv](https://docs.astral.sh/uv/) inside
+   the cloned repo (Python 3.12+). Commands then run as `uv run eksupgrade ...`:
 
 ```sh
 git clone https://github.com/namejsjeongkr/eksupgrade.git
 cd eksupgrade
-poetry install
-poetry run eksupgrade --help
+uv sync
+uv run eksupgrade --help
 ```
 
 2. AWS permissions — an example minimum policy:
@@ -182,7 +182,7 @@ aws eks update-kubeconfig --name <CLUSTER-NAME> --region <REGION>
 ## Usage
 
 > Examples below use the `eksupgrade` command (pipx install). If you installed
-> with Poetry for development, prefix each command with `poetry run`.
+> with uv for development, prefix each command with `uv run`.
 
 ```sh
 eksupgrade --help
