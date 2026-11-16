@@ -492,3 +492,22 @@ def test_rollback_cluster_skips_when_already_at_target(eks_client, eks_cluster) 
 
     assert cluster.rollback_cluster(wait=False) is None
     cluster.eks_client.update_cluster_version.assert_not_called()
+
+
+def test_update_cluster_calls_without_force_by_default(eks_client, eks_cluster) -> None:
+    cluster = _rollback_cluster("1.36", "1.37")
+
+    cluster.update_cluster(wait=False)
+
+    call = cluster.eks_client.update_cluster_version.call_args
+    assert call.kwargs["version"] == "1.37"
+    assert "force" not in call.kwargs
+
+
+def test_update_cluster_passes_force_when_requested(eks_client, eks_cluster) -> None:
+    cluster = _rollback_cluster("1.36", "1.37")
+
+    cluster.update_cluster(wait=False, force=True)
+
+    call = cluster.eks_client.update_cluster_version.call_args
+    assert call.kwargs["force"] is True

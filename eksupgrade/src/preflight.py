@@ -367,6 +367,51 @@ def _render_report(cluster, result: PreflightResult) -> None:
     console.print(f"\nBlocking: {result.blocking_count}   Warnings: {result.warning_count}   {verdict}")
 
 
+_INSIGHT_SEVERITY = {"PASSING": "pass", "WARNING": "warning", "UNKNOWN": "warning", "ERROR": "blocking"}
+
+
+def _list_upgrade_insights(cluster) -> list[dict]:
+    """Return UPGRADE_READINESS insights for the target version (manual nextToken loop)."""
+    insights: list[dict] = []
+    kwargs: dict = {
+        "clusterName": cluster.name,
+        "filter": {"categories": ["UPGRADE_READINESS"], "kubernetesVersions": [cluster.target_version]},
+    }
+    while True:
+        response = cluster.eks_client.list_insights(**kwargs)
+        insights += response.get("insights", [])
+        next_token = response.get("nextToken")
+        if not next_token:
+            return insights
+        kwargs["nextToken"] = next_token
+
+
+def _check_upgrade_insights(cluster) -> list[PreflightFinding]:
+    """Map the target version's UPGRADE_READINESS insights to findings.
+
+    EKS rejects UpdateClusterVersion while any of these is ERROR (unless forced),
+    so ERROR is blocking. Insights reflect the last refresh, not live state.
+    """
+    area = "Upgrade Insights"
+    try:
+        insights = _list_upgrade_insights(cluster)
+    except Exception as exc:  # noqa: BLE001 - read-only check must not abort
+        return [PreflightFinding(area, "list_insights", "warning", f"Could not fetch upgrade insights: {exc}")]
+
+    findings: list[PreflightFinding] = []
+    for insight in insights:
+        if insight.get("kubernetesVersion", cluster.target_version) != cluster.target_version:
+            continue
+        status_block = insight.get("insightStatus") or {}
+        status = status_block.get("status", "UNKNOWN")
+        severity = _INSIGHT_SEVERITY.get(status, "warning")
+        detail = f"{status}: {status_block.get('reason', '')}".strip()
+        if severity == "blocking":
+            detail += " — EKS blocks the upgrade; fix it, or use --override-upgrade-insights if already resolved"
+        findings.append(PreflightFinding(area, insight.get("name", insight.get("id", "?")), severity, detail))
+    return findings
+
+
 def run_preflight(cluster, region: str) -> PreflightResult:
     """Run all read-only preflight checks, print a report, and return the result.
 
@@ -377,6 +422,7 @@ def run_preflight(cluster, region: str) -> PreflightResult:
     """
     findings: list[PreflightFinding] = []
     findings += _check_control_plane(cluster)
+    findings += _check_upgrade_insights(cluster)
     findings += _check_addons(cluster)
     findings += _check_managed_nodegroups(cluster, region)
     findings += _check_karpenter(cluster, region)
