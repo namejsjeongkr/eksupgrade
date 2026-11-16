@@ -77,6 +77,10 @@ def main(
         default=False,
         help="Upgrade only the control plane and add-ons; leave managed, self-managed and Karpenter nodes as-is",
     ),
+    override_upgrade_insights: bool = typer.Option(
+        default=False,
+        help="Pass force=true to the control plane update, overriding upgrade-blocking EKS upgrade insights",
+    ),
 ) -> None:
     """Upgrade a target cluster to the next Kubernetes version."""
     queue: Queue[list[str | int | bool]] = Queue()
@@ -139,7 +143,12 @@ def main(
         # Checking Cluster is Active or Not Before Making an Update
         with timer.phase("Control Plane"):
             if target_cluster.active:
-                target_cluster.update_cluster(wait=True)
+                if override_upgrade_insights:
+                    echo_warning(
+                        "--override-upgrade-insights: EKS upgrade insights will NOT block this control plane update. "
+                        "Use only after confirming the ERROR findings are already resolved."
+                    )
+                target_cluster.update_cluster(wait=True, force=override_upgrade_insights)
             else:
                 echo_warning(
                     f"The target EKS cluster: {target_cluster.name} isn't currently active - status: {target_cluster.status}",

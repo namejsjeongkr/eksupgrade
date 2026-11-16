@@ -215,6 +215,7 @@ eksupgrade --help
    --parallel                  Upgrade node groups in parallel
    --latest-addons             Use the latest eligible add-on versions
    --skip-nodegroups           Upgrade only the control plane and add-ons
+   --override-upgrade-insights Force the control plane update past EKS upgrade insights
    --interactive               Prompt for confirmation        [default: on]
    --help                      Show this message and exit
 ```
@@ -246,6 +247,20 @@ the nodes before that skew is exceeded. Karpenter nodes behind an alias-based
 EC2NodeClass can still drift on their own; block that with a NodePool budget
 such as `{nodes: "0", reasons: ["Drifted"]}` if you need it held.
 
+### Overriding EKS upgrade insights
+
+EKS rejects `UpdateClusterVersion` while an `UPGRADE_READINESS` insight for the
+target version is `ERROR`. Some insights look back 30 days (for example
+"Deprecated APIs removed in Kubernetes v1.x"), so they stay `ERROR` after the
+offending client is already fixed. Once you have confirmed that, pass:
+
+```sh
+eksupgrade upgrade <cluster> <target-version> <region> --override-upgrade-insights
+```
+
+This sends `force=true` to the control plane update only; add-on and node
+upgrades are unchanged. Without the flag the API call is identical to before.
+
 ### Read-only preflight
 
 Run a read-only assessment without changing anything:
@@ -254,7 +269,8 @@ Run a read-only assessment without changing anything:
 eksupgrade upgrade <cluster> <target-version> <region> --preflight --no-interactive
 ```
 
-It checks the control plane, add-ons, managed node groups, Karpenter, and
+It checks the control plane, the target version's EKS upgrade insights
+(`ERROR` is blocking), add-ons, managed node groups, Karpenter, and
 PodDisruptionBudget coverage (warning on replicas≥2 workloads with no PDB), prints
 a summary report, and exits without performing any upgrade. Exit codes: `0` safe
 (warnings allowed), `1` blocking issues found, `2` the checks could not run.

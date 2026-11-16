@@ -12,6 +12,7 @@ from eksupgrade.src.preflight import (
     _check_karpenter,
     _check_managed_nodegroups,
     _check_pod_disruption_budgets,
+    _check_upgrade_insights,
     run_preflight,
 )
 
@@ -299,6 +300,7 @@ def test_run_preflight_aggregates_and_returns_result() -> None:
     cluster.region = "ap-northeast-2"
     cluster.addons = [_addon("coredns", "v1.11.4", "v1.12.4", ["v1.12.4"])]
     cluster.nodegroups = [_ng("ng-al2023", "AL2023_x86_64_STANDARD")]
+    cluster.eks_client.list_insights.return_value = {"insights": [_insight("1.33", "PASSING", name="skew")]}
     with (
         patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("none")),
         patch("eksupgrade.src.preflight.loading_config", side_effect=Exception("no cluster")),
@@ -308,7 +310,7 @@ def test_run_preflight_aggregates_and_returns_result() -> None:
     assert result.blocking_count == 0
     assert result.exit_code() == 0
     areas = {f.area for f in result.findings}
-    assert {"Control Plane", "Addons", "Managed NodeGroups", "Karpenter"} <= areas
+    assert {"Control Plane", "Upgrade Insights", "Addons", "Managed NodeGroups", "Karpenter"} <= areas
 
 
 def test_run_preflight_blocking_bubbles_to_exit_code() -> None:
@@ -317,6 +319,7 @@ def test_run_preflight_blocking_bubbles_to_exit_code() -> None:
     cluster.region = "ap-northeast-2"
     cluster.addons = []
     cluster.nodegroups = []
+    cluster.eks_client.list_insights.return_value = {"insights": []}
     with (
         patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("none")),
         patch("eksupgrade.src.preflight.loading_config", side_effect=Exception("no cluster")),
@@ -575,3 +578,64 @@ def test_custom_ng_current_image_reads_lt_then_image():
 
     fake_ec2.describe_launch_template_versions.assert_called_once_with(LaunchTemplateId="lt-1", Versions=["3"])
     fake_ec2.describe_images.assert_called_once_with(ImageIds=["ami-cur"])
+
+
+def _insight(version: str, status: str, name: str = "Deprecated APIs", reason: str = "r") -> dict:
+    return {"name": name, "kubernetesVersion": version, "insightStatus": {"status": status, "reason": reason}}
+
+
+def _insight_cluster(pages: list[list[dict]]) -> MagicMock:
+    cluster = _cluster(version="1.36", target_version="1.37")
+    cluster.name = "c"
+    responses = []
+    for index, page in enumerate(pages):
+        response: dict = {"insights": page}
+        if index < len(pages) - 1:
+            response["nextToken"] = f"t{index}"
+        responses.append(response)
+    cluster.eks_client.list_insights.side_effect = responses
+    return cluster
+
+
+def test_upgrade_insights_error_is_blocking() -> None:
+    cluster = _insight_cluster([[_insight("1.37", "ERROR", reason="deprecated API used")]])
+
+    findings = _check_upgrade_insights(cluster)
+
+    assert [(f.severity, f.item) for f in findings] == [("blocking", "Deprecated APIs")]
+    assert "deprecated API used" in findings[0].detail
+    assert "--override-upgrade-insights" in findings[0].detail
+    kwargs = cluster.eks_client.list_insights.call_args_list[0].kwargs
+    assert kwargs["filter"] == {"categories": ["UPGRADE_READINESS"], "kubernetesVersions": ["1.37"]}
+
+
+def test_upgrade_insights_warning_and_unknown_are_warnings_passing_is_pass() -> None:
+    cluster = _insight_cluster(
+        [
+            [_insight("1.37", "WARNING", name="skew")],
+            [_insight("1.37", "UNKNOWN", name="u"), _insight("1.37", "PASSING", name="p")],
+        ]
+    )
+
+    findings = _check_upgrade_insights(cluster)
+
+    assert {f.item: f.severity for f in findings} == {"skew": "warning", "u": "warning", "p": "pass"}
+    assert cluster.eks_client.list_insights.call_count == 2
+
+
+def test_upgrade_insights_ignores_other_versions() -> None:
+    cluster = _insight_cluster([[_insight("1.38", "ERROR", name="later"), _insight("1.37", "PASSING", name="now")]])
+
+    findings = _check_upgrade_insights(cluster)
+
+    assert [f.item for f in findings] == ["now"]
+
+
+def test_upgrade_insights_fetch_failure_is_warning() -> None:
+    cluster = _cluster(version="1.36", target_version="1.37")
+    cluster.eks_client.list_insights.side_effect = RuntimeError("AccessDenied")
+
+    findings = _check_upgrade_insights(cluster)
+
+    assert [f.severity for f in findings] == ["warning"]
+    assert "AccessDenied" in findings[0].detail

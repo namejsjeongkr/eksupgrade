@@ -405,3 +405,38 @@ def test_nodegroups_upgraded_by_default():
 
     assert result.exit_code == 0, result.output
     fake_cluster.upgrade_nodegroups.assert_called_once()
+
+
+def test_override_upgrade_insights_forces_control_plane_update():
+    fake_cluster = _fake_upgradeable_cluster()
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch("eksupgrade.cli.actual_update"),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "upgrade",
+                "c",
+                "1.35",
+                "ap-northeast-2",
+                "--no-interactive",
+                "--skip-nodegroups",
+                "--override-upgrade-insights",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    fake_cluster.update_cluster.assert_called_once_with(wait=True, force=True)
+    assert "upgrade insights" in result.output.lower()
+
+
+def test_control_plane_update_not_forced_by_default():
+    fake_cluster = _fake_upgradeable_cluster()
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch("eksupgrade.cli.actual_update"),
+    ):
+        runner.invoke(app, ["upgrade", "c", "1.35", "ap-northeast-2", "--no-interactive", "--skip-nodegroups"])
+
+    fake_cluster.update_cluster.assert_called_once_with(wait=True, force=False)

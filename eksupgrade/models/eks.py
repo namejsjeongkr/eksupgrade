@@ -797,8 +797,14 @@ class Cluster(EksResource):
         """Return the Cluster.target_version as a Version object."""
         return Version(self.target_version)
 
-    def update_cluster(self, wait: bool = True) -> UpdateTypeDef | None:
-        """Upgrade the cluster itself."""
+    def update_cluster(self, wait: bool = True, force: bool = False) -> UpdateTypeDef | None:
+        """Upgrade the cluster itself.
+
+        Args:
+            wait: Block until the cluster is ACTIVE again.
+            force: Pass force=True to UpdateClusterVersion, overriding upgrade-blocking
+                UPGRADE_READINESS insights. Omitted from the API call unless set.
+        """
         if self._version_object > self._target_version_object:
             echo_warning(
                 f"Cluster: {self.name} version: {self.version} already greater than target version: {self.target_version}! Skipping cluster upgrade!",
@@ -819,9 +825,10 @@ class Cluster(EksResource):
             raise InvalidUpgradeTargetVersion()
 
         echo_info(f"Upgrading cluster: {self.name} from version: {self.version} to version: {self.target_version}")
-        update_response: UpdateClusterVersionResponseTypeDef = self.eks_client.update_cluster_version(
-            name=self.name, version=self.target_version
-        )
+        update_kwargs: dict[str, Any] = {"name": self.name, "version": self.target_version}
+        if force:
+            update_kwargs["force"] = True
+        update_response: UpdateClusterVersionResponseTypeDef = self.eks_client.update_cluster_version(**update_kwargs)
         update_response_body: UpdateTypeDef = update_response["update"]
         _update_errors = update_response_body.get("errors", [])
 
