@@ -11,6 +11,8 @@ import boto3
 
 from eksupgrade.utils import echo_error, echo_info, echo_success, get_logger
 
+from .self_managed import update_current_launch_template_ami
+
 logger = get_logger(__name__)
 
 
@@ -159,108 +161,77 @@ def get_num_of_instances(asg_name: str, exclude_ids: list[str], region: str) -> 
     return len(instances)
 
 
-def old_lt_scenarios(inst: dict[str, Any], asg_lt_name: str, asg_lt_version: int) -> bool:
-    """Get the old launch template based on launch template name and version 1!=2."""
-    lt_name = inst["LaunchTemplate"]["LaunchTemplateName"]
-    lt_version = int(inst["LaunchTemplate"]["Version"])
-    return (lt_name != asg_lt_name) or (lt_version != int(asg_lt_version))
+def get_outdated_instance_ids(asg_name: str, latest_img: str, region: str) -> list[str]:
+    """Return running/pending instance IDs whose ImageId differs from latest_img.
 
-
-def get_old_lt(asg_name: str, region: str) -> list[str]:
-    """Get the old launch template."""
+    Detection is by image, uniform across launch-configuration, launch-template,
+    and mixed-instances ASGs — the legacy per-launch-type comparison was broken
+    for launch templates (it compared an instance's LT version against itself
+    and returned full dicts where the caller expected instance IDs).
+    """
     asg_client = boto3.client("autoscaling", region_name=region)
     ec2_client = boto3.client("ec2", region_name=region)
-
-    old_lt_instance_ids: list[str] = []
-    instances: list[dict[str, Any]] = []
-
     response = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
-    asg_lt_name = ""
-    # finding the launch type
-    if "LaunchTemplate" in response["AutoScalingGroups"][0]:
-        response["AutoScalingGroups"][0]["LaunchTemplate"]["LaunchTemplateId"]
-        asg_lt_name = response["AutoScalingGroups"][0]["LaunchTemplate"]["LaunchTemplateName"]
-    elif "MixedInstancesPolicy" in response["AutoScalingGroups"][0]:
-        response["AutoScalingGroups"][0]["MixedInstancesPolicy"]["LaunchTemplate"]["LaunchTemplateSpecification"][
-            "LaunchTemplateId"
-        ]
-        asg_lt_name = response["AutoScalingGroups"][0]["MixedInstancesPolicy"]["LaunchTemplate"][
-            "LaunchTemplateSpecification"
-        ]["LaunchTemplateName"]
-    else:
-        echo_error(f"Old Launch Template not found! ASG: {asg_name} - Region: {region}")
+    instance_ids = [instance["InstanceId"] for instance in response["AutoScalingGroups"][0]["Instances"]]
+    if not instance_ids:
         return []
 
-    # checking whether there are instances with 1!=2 mismatch template version
-    old_lt_instance_ids = [
-        instance["InstanceId"]
-        for instance in response["AutoScalingGroups"][0]["Instances"]
-        if old_lt_scenarios(instance, asg_lt_name, int(instance["LaunchTemplate"]["Version"]))
-    ]
-    if not old_lt_instance_ids:
-        return []
-    response = ec2_client.describe_instances(InstanceIds=old_lt_instance_ids)
-    for reservation in response["Reservations"]:
+    outdated: list[str] = []
+    inst_response = ec2_client.describe_instances(InstanceIds=instance_ids)
+    for reservation in inst_response["Reservations"]:
         for instance in reservation["Instances"]:
-            instances.append(instance)
-    return instances
+            if instance["State"]["Name"] in ("running", "pending") and instance["ImageId"] != latest_img:
+                outdated.append(instance["InstanceId"])
+    return outdated
 
 
-def old_launch_config_instances(asg_name: str, region: str) -> list[str]:
-    """Get the old launch configuration instance IDs."""
-    asg_client = boto3.client("autoscaling", region_name=region)
-    old_lc_ids: list[str] = []
-    # describing the asg group
-    response = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
-    instances = response["AutoScalingGroups"][0]["Instances"]
-    for inst in instances:
-        # checking the LaunchConfiguration is matching or not
-        if inst.get("LaunchConfigurationName") != response["AutoScalingGroups"][0]["LaunchConfigurationName"]:
-            old_lc_ids.append(inst["InstanceId"])
-    return old_lc_ids
-
-
-def outdated_lt(asgs, region: str) -> list[str]:
-    """Get the outdated launch template."""
-    asg_client = boto3.client("autoscaling", region_name=region)
-    asg = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asgs])
-    asg_name = asg["AutoScalingGroups"][0]["AutoScalingGroupName"]
-    launch_type = ""
-    if "LaunchConfigurationName" in asg["AutoScalingGroups"][0]:
-        launch_type = "LaunchConfiguration"
-    elif "LaunchTemplate" in asg["AutoScalingGroups"][0]:
-        launch_type = "LaunchTemplate"
-    elif "MixedInstancesPolicy" in asg["AutoScalingGroups"][0]:
-        launch_type = "LaunchTemplate"
-    else:
-        return []
-    old_instances: list[str] = []
-
-    if launch_type == "LaunchConfiguration":
-        temp = old_launch_config_instances(asg_name, region)
-        if temp:
-            old_instances = temp
-            return old_instances
-        return []
-
-    # checking with launch Template
-    if launch_type == "LaunchTemplate":
-        temp = get_old_lt(asg_name, region)
-        if temp:
-            old_instances = temp
-            return old_instances
-        return []
-    return []
+def _asg_launch_template_spec(asg_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the ASG's launch template specification (direct or mixed-instances), if any."""
+    if asg_data.get("LaunchTemplate"):
+        return asg_data["LaunchTemplate"]
+    mixed = asg_data.get("MixedInstancesPolicy", {})
+    return mixed.get("LaunchTemplate", {}).get("LaunchTemplateSpecification") or None
 
 
 def add_autoscaling(asg_name: str, img_id: str, region: str) -> dict[str, Any]:
-    """Add the new Launch Configuration to the ASG."""
+    """Point the ASG at the target AMI.
+
+    Launch-template ASGs (direct or MixedInstancesPolicy) get a NEW launch
+    template version with the AMI; the ASG is re-pinned only when it pins a
+    concrete version (a $Latest/$Default spec picks the new version up on its
+    own). Launch-configuration ASGs keep the legacy LC-copy path — note that
+    CreateLaunchConfiguration is retired and blocked in newer AWS accounts;
+    the legacy code attached an LC even to launch-template ASGs, silently
+    downgrading them.
+    """
     asg_client = boto3.client("autoscaling", region_name=region)
+    response = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
+    asg_data = response["AutoScalingGroups"][0]
+
+    lt_spec = _asg_launch_template_spec(asg_data)
+    if lt_spec:
+        lt_id = lt_spec["LaunchTemplateId"]
+        new_version = update_current_launch_template_ami(lt_id, img_id, region)
+        current_version = str(lt_spec.get("Version", "$Latest"))
+        if current_version not in ("$Latest", "$Default"):
+            if asg_data.get("LaunchTemplate"):
+                asg_client.update_auto_scaling_group(
+                    AutoScalingGroupName=asg_name,
+                    LaunchTemplate={"LaunchTemplateId": lt_id, "Version": str(new_version)},
+                )
+            else:
+                mixed_policy = asg_data["MixedInstancesPolicy"]
+                mixed_policy["LaunchTemplate"]["LaunchTemplateSpecification"]["Version"] = str(new_version)
+                asg_client.update_auto_scaling_group(AutoScalingGroupName=asg_name, MixedInstancesPolicy=mixed_policy)
+        echo_success(f"Launch template {lt_id} now at version {new_version} with AMI {img_id}")
+        return {"launchTemplateId": lt_id, "version": new_version}
+
+    if not asg_data.get("LaunchConfigurationName"):
+        raise Exception(f"ASG {asg_name} has neither a launch template nor a launch configuration")
+
     timestamp = time.time()
     timestamp_string = datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d  %H-%M-%S")
-    response = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
-
-    source_instance_id = response.get("AutoScalingGroups")[0]["Instances"][0]["InstanceId"]
+    source_instance_id = asg_data["Instances"][0]["InstanceId"]
     new_launch_config_name = f"LC {img_id} {timestamp_string} {str(uuid.uuid4())}"
 
     try:

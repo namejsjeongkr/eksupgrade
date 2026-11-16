@@ -15,7 +15,7 @@ from .src.boto_aws import (
     get_latest_instance,
     get_num_of_instances,
     get_outdated_asg,
-    outdated_lt,
+    get_outdated_instance_ids,
     wait_for_ready,
     worker_terminate,
 )
@@ -96,7 +96,7 @@ def actual_update(cluster_name, asg_iter, to_update, region, max_retry, forced):
         add_autoscaling(asg_iter, latest_ami, region)
         echo_info(f"New Launch Configuration Added to = {asg_iter} With EKS AMI = {latest_ami}")
 
-    outdated_instances = outdated_lt(asg_iter, region)
+    outdated_instances = get_outdated_instance_ids(asg_iter, latest_ami, region)
     if not outdated_instances:
         return True
 
