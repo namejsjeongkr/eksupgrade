@@ -214,6 +214,7 @@ eksupgrade --help
    --force                     Force pod eviction (ignores PDB / unmanaged pods)
    --parallel                  Upgrade node groups in parallel
    --latest-addons             Use the latest eligible add-on versions
+   --skip-nodegroups           Upgrade only the control plane and add-ons
    --interactive               Prompt for confirmation        [default: on]
    --help                      Show this message and exit
 ```
@@ -227,6 +228,23 @@ eksupgrade upgrade my-cluster 1.35 ap-northeast-2
 > **Breaking change**: earlier releases were invoked without a subcommand
 > (`eksupgrade <cluster> <version> <region>`). The upgrade flow now lives
 > under `eksupgrade upgrade ...`.
+
+### Control plane and add-ons only
+
+```sh
+eksupgrade upgrade <cluster> <target-version> <region> --skip-nodegroups
+```
+
+Upgrades the control plane and add-ons, then stops. Managed node groups,
+self-managed ASGs and the Karpenter drift wait are skipped, and the Cluster
+Autoscaler is not paused because no nodes are replaced. Use it when nodes are
+rolled separately (for example by Terraform launch templates) or when you want
+to step the control plane up several minors and replace nodes once at the end.
+
+Kubernetes allows a kubelet up to three minors behind the API server, so roll
+the nodes before that skew is exceeded. Karpenter nodes behind an alias-based
+EC2NodeClass can still drift on their own; block that with a NodePool budget
+such as `{nodes: "0", reasons: ["Drifted"]}` if you need it held.
 
 ### Read-only preflight
 

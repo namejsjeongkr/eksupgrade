@@ -44,6 +44,19 @@ def callback(
     """Automated Amazon EKS cluster upgrade CLI utility."""
 
 
+def _warn_skipped_node_phase(target_cluster: Cluster) -> None:
+    """Explain what --skip-nodegroups left untouched and the kubelet skew it creates."""
+    echo_warning(
+        "--skip-nodegroups: managed node groups, self-managed ASGs and the Karpenter drift wait were skipped. "
+        "The Cluster Autoscaler was not paused because no nodes are replaced."
+    )
+    echo_warning(
+        f"Nodes keep their current kubelet while the control plane is now {target_cluster.target_version}. "
+        "Kubernetes allows kubelet up to 3 minors behind the API server; roll the nodes before the skew exceeds that. "
+        "Karpenter nodes using an alias-based EC2NodeClass may still drift on their own, subject to NodePool budgets."
+    )
+
+
 @app.command(name="upgrade")
 def main(
     cluster_name: str = typer.Argument(..., help="The name of the cluster to be upgraded"),
@@ -60,6 +73,10 @@ def main(
         default=False, help="Disable the pre-upgrade and post-upgrade checks during upgrade scenarios"
     ),
     interactive: bool = typer.Option(default=True, help="If enabled, prompt the user for confirmations"),
+    skip_nodegroups: bool = typer.Option(
+        default=False,
+        help="Upgrade only the control plane and add-ons; leave managed, self-managed and Karpenter nodes as-is",
+    ),
 ) -> None:
     """Upgrade a target cluster to the next Kubernetes version."""
     queue: Queue[list[str | int | bool]] = Queue()
@@ -142,6 +159,11 @@ def main(
 
         # addons update
         target_cluster.upgrade_addons(wait=True, timer=timer)
+
+        if skip_nodegroups:
+            _warn_skipped_node_phase(target_cluster)
+            echo_info(f"EKS Cluster {cluster_name} UPDATED TO {cluster_version} (nodes not upgraded)")
+            return
 
         # checking Cluster Autoscaler present and the value associated from it
         is_ca_present, ca_replicas_value, ca_name, ca_namespace = is_cluster_auto_scaler_present(

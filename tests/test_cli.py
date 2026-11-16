@@ -344,3 +344,64 @@ def test_upgrade_failure_exits_nonzero():
         result = runner.invoke(app, ["upgrade", "c", "1.35", "ap-northeast-2", "--no-interactive"])
 
     assert result.exit_code != 0
+
+
+def _skip_nodegroups_cluster() -> MagicMock:
+    """Cluster with a managed NG and a self-managed ASG that must NOT be touched."""
+    fake_cluster = _fake_upgradeable_cluster()
+    fake_cluster.asg_names = ["self-managed-asg"]
+    return fake_cluster
+
+
+def test_skip_nodegroups_upgrades_control_plane_and_addons_only():
+    """--skip-nodegroups upgrades the control plane and add-ons, then stops:
+    no managed node group, self-managed ASG, or Karpenter drift handling."""
+    fake_cluster = _skip_nodegroups_cluster()
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch("eksupgrade.cli.is_cluster_auto_scaler_present") as mock_ca,
+        patch("eksupgrade.cli.is_karpenter_present") as mock_karpenter,
+        patch("eksupgrade.cli.cluster_auto_enable_disable") as mock_toggle,
+        patch("eksupgrade.cli.handle_karpenter_drift") as mock_drift,
+        patch("eksupgrade.cli.actual_update") as mock_self_managed,
+    ):
+        result = runner.invoke(app, ["upgrade", "c", "1.35", "ap-northeast-2", "--no-interactive", "--skip-nodegroups"])
+
+    assert result.exit_code == 0, result.output
+    fake_cluster.update_cluster.assert_called_once()
+    fake_cluster.upgrade_addons.assert_called_once()
+    fake_cluster.upgrade_nodegroups.assert_not_called()
+    mock_self_managed.assert_not_called()
+    mock_drift.assert_not_called()
+    # No node replacement happens, so the Cluster Autoscaler is neither probed nor paused.
+    mock_ca.assert_not_called()
+    mock_toggle.assert_not_called()
+    mock_karpenter.assert_not_called()
+    assert "--skip-nodegroups" in result.output
+    assert "UPDATED TO" in result.output
+
+
+def test_skip_nodegroups_warns_about_kubelet_skew():
+    """Skipping nodes widens the kubelet/control-plane gap; the run must say so."""
+    fake_cluster = _skip_nodegroups_cluster()
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch("eksupgrade.cli.actual_update"),
+    ):
+        result = runner.invoke(app, ["upgrade", "c", "1.35", "ap-northeast-2", "--no-interactive", "--skip-nodegroups"])
+
+    assert "skew" in result.output
+
+
+def test_nodegroups_upgraded_by_default():
+    """Regression guard: without --skip-nodegroups the node phase still runs."""
+    fake_cluster = _fake_upgradeable_cluster()
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch("eksupgrade.cli.is_cluster_auto_scaler_present", return_value=(False, 0, "", "")),
+        patch("eksupgrade.cli.is_karpenter_present", return_value=(False, 0, "")),
+    ):
+        result = runner.invoke(app, ["upgrade", "c", "1.35", "ap-northeast-2", "--no-interactive"])
+
+    assert result.exit_code == 0, result.output
+    fake_cluster.upgrade_nodegroups.assert_called_once()
