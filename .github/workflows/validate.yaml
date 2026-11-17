@@ -14,34 +14,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Setup Dependencies
         uses: './.github/actions/dep-setup'
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Run Styling Enforcement
         shell: bash
-        run: poetry poe check
+        run: uv run --locked poe check
 
       # TODO: As soon as the repo is in a state to enable this, we'll do so.
       # - name: Run Style Linting Enforcement
       #   shell: bash
-      #   run: poetry poe lint
+      #   run: uv run --locked poe lint
 
   unit-tests:
     name: Run Unit Tests
     strategy:
+      fail-fast: false
       matrix:
-        version: ['3.10', '3.11', '3.12']
+        version: ['3.12', '3.13', '3.14']
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Source
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -52,22 +53,22 @@ jobs:
 
       - name: Run Tests
         shell: bash
-        run: poetry poe test
+        run: uv run --locked poe test
 
   security:
     name: Run Security Checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Setup Dependencies
         uses: './.github/actions/dep-setup'
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Run Security Checks
         shell: bash
-        run: poetry poe safety
+        run: uv run --locked poe safety

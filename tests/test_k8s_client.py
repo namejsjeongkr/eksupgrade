@@ -4,7 +4,6 @@ import base64
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from kubernetes import client as k8s_client
 
 from eksupgrade.src.k8s_client import get_bearer_token, loading_config
